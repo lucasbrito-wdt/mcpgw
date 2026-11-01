@@ -50,7 +50,10 @@ func (s *Service) Execute(ctx context.Context, subj policy.Subject, code string)
 		return nil, fmt.Errorf("%w: audit unavailable", ErrInternal)
 	}
 	run := &execution{svc: s, subj: subj, id: execID}
-	out, err := s.sandbox.Run(ctx, code, run.bridge, s.limits)
+	lim := s.limits
+	// Engines that pool processes (montyrs) never hand one user's worker to another.
+	lim.Owner = subj.UserID
+	out, err := s.sandbox.Run(ctx, code, run.bridge, lim)
 
 	status, msg := executionStatus(err)
 	if ferr := s.audit.FinishExecution(ctx, execID, status, int(run.calls.Load()), msg); ferr != nil {

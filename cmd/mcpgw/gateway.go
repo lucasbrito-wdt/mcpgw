@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"os"
+	"path/filepath"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -20,6 +22,7 @@ import (
 	"github.com/lucasbrito-wdt/mcpgw/internal/policy"
 	"github.com/lucasbrito-wdt/mcpgw/internal/portalapi"
 	"github.com/lucasbrito-wdt/mcpgw/internal/sandbox"
+	"github.com/lucasbrito-wdt/mcpgw/internal/sandbox/montyrs"
 	"github.com/lucasbrito-wdt/mcpgw/internal/store"
 	"github.com/lucasbrito-wdt/mcpgw/internal/upstream"
 	"github.com/lucasbrito-wdt/mcpgw/internal/upstreamauth"
@@ -38,7 +41,7 @@ type gateway struct {
 	oauth        *oauth.Server
 	policy       *policy.Engine
 	audit        *audit.Recorder
-	sandbox      *sandbox.Executor
+	sandbox      sandbox.Runner
 	upstream     *upstream.Client
 	upstreamAuth *upstreamauth.Manager
 	autoSync     *catalog.AutoSyncer
@@ -95,7 +98,7 @@ func newGateway(ctx context.Context, cfg *config.Config, log *slog.Logger) (gw *
 	if err = gw.audit.EnsurePartitions(ctx, time.Now()); err != nil {
 		return gw, err
 	}
-	if gw.sandbox, err = sandbox.NewExecutor(); err != nil {
+	if gw.sandbox, err = newSandbox(cfg.SandboxEngine); err != nil {
 		return gw, err
 	}
 	gw.upstream = upstream.New(upstream.WithResolver(upstream.NewDBResolver(gw.pool, v)), upstream.WithLogger(log))
@@ -126,7 +129,7 @@ func newGateway(ctx context.Context, cfg *config.Config, log *slog.Logger) (gw *
 		Pool: gw.pool, Lister: gw.upstream, Credentials: gw.upstreamAuth, Logger: log, Timeout: catalogSyncLimit,
 	})
 	svc, err := codemode.New(codemode.Options{
-		Pool: gw.pool, Sandbox: gw.sandbox, Policy: gw.policy, Upstream: gw.upstream,
+		Pool: gw.pool, Sandbox: gw.sandbox, Python: cfg.SandboxEngine == config.EngineMonty, Policy: gw.policy, Upstream: gw.upstream,
 		Credentials: gw.upstreamAuth, Audit: gw.audit, PublicURL: cfg.PublicURL,
 		Limits: sandbox.DefaultLimits(), Logger: log,
 	})
@@ -140,6 +143,55 @@ func newGateway(ctx context.Context, cfg *config.Config, log *slog.Logger) (gw *
 	}
 	err = gw.buildWeb(cfg, v, log)
 	return gw, err
+}
+
+// workerBinary is the montyrs worker file name looked up next to the gateway executable.
+const workerBinary = "montyrs-worker"
+
+// newSandbox builds the executor for engine. The monty worker is $MCPGW_MONTYRS_WORKER, else
+// montyrs-worker beside the running executable; a missing or non-executable file fails here,
+// not on the first script.
+func newSandbox(engine string) (sandbox.Runner, error) {
+	if engine != config.EngineMonty {
+		return runner(sandbox.NewExecutor())
+	}
+	path := os.Getenv(montyrs.WorkerPathEnv)
+	if path == "" {
+		exe, err := os.Executable()
+		if err != nil {
+			return nil, fmt.Errorf("sandbox engine monty: locate executable: %w", err)
+		}
+		path = filepath.Join(filepath.Dir(exe), workerBinary)
+	}
+	// The worker is exec'd from another directory, so check and run the same absolute path.
+	path, err := filepath.Abs(path)
+	if err != nil {
+		return nil, fmt.Errorf("sandbox engine monty: resolve worker path: %w", err)
+	}
+	if err := checkWorker(path); err != nil {
+		return nil, err
+	}
+	return runner(montyrs.NewExecutor(montyrs.WithWorkerPath(path)))
+}
+
+// runner keeps a failed constructor from becoming a non-nil interface around a nil pointer,
+// which Close would then dereference.
+func runner[T sandbox.Runner](e T, err error) (sandbox.Runner, error) {
+	if err != nil {
+		return nil, err
+	}
+	return e, nil
+}
+
+func checkWorker(path string) error {
+	info, err := os.Stat(path)
+	if err != nil {
+		return fmt.Errorf("sandbox engine monty: worker %q: %w (build it with make worker or set %s)", path, err, montyrs.WorkerPathEnv)
+	}
+	if !info.Mode().IsRegular() || info.Mode()&0o111 == 0 {
+		return fmt.Errorf("sandbox engine monty: worker %q is not an executable file", path)
+	}
+	return nil
 }
 
 // buildWeb builds the admin API, the user portal API and the static UI handler. Both APIs share

@@ -207,6 +207,23 @@ What the gateway serves on its single port:
 | `/portal/`, `/portal/api/` | User portal and its API. |
 | `/healthz` | Health check. |
 
+## Sandbox engines
+
+Code mode runs scripts in a sandbox. Two engines exist:
+
+- `MCPGW_SANDBOX_ENGINE`: `qjs` (default, QuickJS in WebAssembly) or `monty` (Python in a native Rust worker).
+- `MCPGW_MONTYRS_WORKER`: path to the worker used by `monty`. Default: `montyrs-worker` next to the `mcpgw` executable, resolved to an absolute path.
+- `make worker` builds the worker into `bin/montyrs-worker` (`.exe` on Windows). `make build` runs it too.
+- On Windows the worker runs inside an AppContainer, which needs read and execute on the exe: `make worker` grants it; for a worker copied elsewhere run `icacls montyrs-worker.exe /grant "*S-1-15-2-1:(RX)"`.
+
+Security per platform: the worker confines itself at the OS level.
+
+- Linux (strongest): syscall allowlist (seccomp), `no_new_privs` and rlimits.
+- Windows: AppContainer, Job Object and process mitigation policies.
+- macOS: Seatbelt denies network and file access, but it does not filter syscalls or prevent executable memory (W^X is only the OS default). A full escape needs breaking the Monty interpreter and then Seatbelt.
+
+Prefer Linux for multi-tenant production.
+
 ## Web admin and portal
 
 The UI is a Next.js static export embedded in the binary (`web/admin`), served from the same origin

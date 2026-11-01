@@ -50,8 +50,11 @@ type CredentialSource interface {
 
 // Options configures a Service. Credentials may be nil when every server has auth_kind none.
 type Options struct {
-	Pool        *pgxpool.Pool
-	Sandbox     *sandbox.Executor
+	Pool    *pgxpool.Pool
+	Sandbox sandbox.Runner
+	// Python reports that Sandbox runs Python scripts (montyrs) instead of JavaScript; it only
+	// changes the tool descriptions shown to the model.
+	Python      bool
 	Policy      *policy.Engine
 	Upstream    *upstream.Client
 	Credentials CredentialSource
@@ -72,7 +75,8 @@ const DefaultMaxConcurrentPerSubject = 3
 
 // Service is safe for concurrent use.
 type Service struct {
-	sandbox   *sandbox.Executor
+	sandbox   sandbox.Runner
+	python    bool
 	policy    *policy.Engine
 	upstream  *upstream.Client
 	creds     CredentialSource
@@ -128,7 +132,7 @@ func New(o Options) (*Service, error) {
 	catalog := newCatalogCache(o.Pool, o.CatalogTTL)
 	o.Policy.OnInvalidate(catalog.invalidate)
 	return &Service{
-		sandbox: o.Sandbox, policy: o.Policy, upstream: o.Upstream, creds: o.Credentials, audit: o.Audit,
+		sandbox: o.Sandbox, python: o.Python, policy: o.Policy, upstream: o.Upstream, creds: o.Credentials, audit: o.Audit,
 		publicURL: strings.TrimRight(o.PublicURL, "/"), limits: o.Limits, log: log,
 		catalog:       catalog,
 		maxPerSubject: o.MaxConcurrentPerSubject,
@@ -138,6 +142,12 @@ func New(o Options) (*Service, error) {
 
 const searchDescription = `Find tools you can call. Pass a few keywords (for example "issues github"). ` +
 	`Returns TypeScript declarations of the best matches (top %d) and their qualified names. ` +
+	`Call this before execute to learn exact tool names and argument types.`
+
+const searchDescriptionPython = `Find tools you can call. Pass a few keywords (for example "issues github"). ` +
+	`Returns declarations of the best matches (top %d) and their qualified names; ` +
+	`the declarations use TypeScript notation to describe the JSON shape of each tool's argument, ` +
+	`which you pass as a Python dict. ` +
 	`Call this before execute to learn exact tool names and argument types.`
 
 const executeDescription = `Run JavaScript that calls tools. Pass an async arrow function: ` +
@@ -150,6 +160,26 @@ const executeDescription = `Run JavaScript that calls tools. Pass an async arrow
 	`Keep dependent writes sequential: await each before starting the next. ` +
 	`Return only the data you need; large results are rejected. ` +
 	`No network, files or timers. The word "import" is forbidden anywhere in the code.`
+
+const executeDescriptionPython = `Run a Python script that calls tools. Two globals are available: ` +
+	`call_tool("server.tool", {"arg": 1}) blocks and returns the decoded JSON reply, and ` +
+	`await call_tool_async("server.tool", {"arg": 1}) is awaitable and overlaps with other calls. ` +
+	`Available servers: %s. ` +
+	`Tool names are qualified, for example "tracker.get_issue"; every tool takes one dict argument. ` +
+	`Use search first for exact names and arguments. ` +
+	`Run independent reads in parallel (up to 8 at once) with import asyncio and top-level await: ` +
+	`a, b = await asyncio.gather(call_tool_async("x.get_a", args), call_tool_async("y.get_b", args)). ` +
+	`The blocking call_tool pauses the whole script, so calls made through it never overlap, even inside asyncio.gather. ` +
+	`A failed tool call raises RuntimeError (at the call for call_tool, at the await for call_tool_async); ` +
+	`use try/except to handle it. asyncio.gather has no return_exceptions support: to keep going when some calls fail, ` +
+	`wrap each call in an async def helper that catches RuntimeError, then gather the helpers. ` +
+	`Keep dependent calls sequential: use the result of one call before starting the next. ` +
+	`The value of the last expression of the script is the result and must be JSON-serializable ` +
+	`(dict, list, str, int, float, bool, None); make the last statement a bare expression, for example a dict literal or a variable name. ` +
+	`Do not print the result. Return only the data you need; large results are rejected. ` +
+	`No network, files or real OS access (open, os, pathlib raise PermissionError). ` +
+	`Only a subset of Python and its standard library is available: no third-party packages, ` +
+	`and some modules or features may be missing; if something is unsupported, use a simpler construct.`
 
 // ToolDescriptions returns the model-facing descriptions of the search and execute tools. The
 // execute description lists the server namespaces the subject can use.
@@ -166,6 +196,9 @@ func (s *Service) ToolDescriptions(ctx context.Context, subj policy.Subject) (se
 	list := "none (no access granted)"
 	if len(servers) > 0 {
 		list = strings.Join(servers, ", ")
+	}
+	if s.python {
+		return fmt.Sprintf(searchDescriptionPython, maxSearchResults), fmt.Sprintf(executeDescriptionPython, list)
 	}
 	return fmt.Sprintf(searchDescription, maxSearchResults), fmt.Sprintf(executeDescription, list)
 }

@@ -57,6 +57,7 @@ func TestLoadInvalid(t *testing.T) {
 		"pprof on all ifaces":   {EnvDatabaseURL: "p", EnvPprofAddr: ":6060"},
 		"pprof on public ip":    {EnvDatabaseURL: "p", EnvPprofAddr: "0.0.0.0:6060"},
 		"pprof without port":    {EnvDatabaseURL: "p", EnvPprofAddr: "127.0.0.1"},
+		"unknown engine":        {EnvDatabaseURL: "p", EnvSandboxEngine: "v8"},
 	}
 	for name, m := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -64,6 +65,15 @@ func TestLoadInvalid(t *testing.T) {
 				t.Fatal("expected error")
 			}
 		})
+	}
+}
+
+func TestLoadSandboxEngine(t *testing.T) {
+	for in, want := range map[string]string{"": EngineQJS, "qjs": EngineQJS, "monty": EngineMonty, " Monty ": EngineMonty} {
+		cfg, err := Load(env(map[string]string{EnvDatabaseURL: "p", EnvSandboxEngine: in}))
+		if err != nil || cfg.SandboxEngine != want {
+			t.Fatalf("%q: engine=%v err=%v, want %s", in, cfg, err, want)
+		}
 	}
 }
 

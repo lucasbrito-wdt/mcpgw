@@ -1,0 +1,6 @@
+# Static CRT: the confined worker only loads Microsoft-signed images, so no vcruntime140.dll.
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]
+
+[target.aarch64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]
