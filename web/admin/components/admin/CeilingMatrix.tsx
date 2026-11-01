@@ -1,15 +1,17 @@
 "use client";
 
-import { useState } from "react";
+import { useRef, useState } from "react";
 
 import { api, ApiError } from "../../lib/api";
+import { initialsOf } from "../../lib/format";
 import { useT } from "../../lib/i18n";
 import { adminAccess } from "../../lib/i18n/messages/adminAccess";
 import type { AccessLevel } from "../../lib/types";
 import { ServiceLogo } from "../brand/ServiceLogo";
 import { useToast } from "../ui/toast";
+import { cn } from "../../lib/utils";
 
-import { LevelSelect } from "./LevelSelect";
+import { CeilingGauge, CeilingSkyline } from "./CeilingGauge";
 
 /** Ceiling per `${userId}|${slug}`; a missing key means "Sem acesso". */
 export type CeilingState = Record<string, AccessLevel>;
@@ -41,14 +43,14 @@ export interface CeilingMatrixProps {
   initial: CeilingState;
 }
 
-const HEAD = "px-3 py-2 text-xs font-medium text-fg-muted";
-
-/** Users (rows) by servers (columns). A change shows at once and rolls back if `PUT /ceilings/{user_id}/{slug}` fails. */
+/** Accounts on the left, each with its access silhouette; the selected one shows a ceiling gauge per server. A change shows at once and rolls back if `PUT /ceilings/{user_id}/{slug}` fails. */
 export function CeilingMatrix({ users, servers, initial }: CeilingMatrixProps) {
   const t = useT(adminAccess);
   const toast = useToast();
   const [state, setState] = useState<CeilingState>(initial);
   const [pending, setPending] = useState<ReadonlySet<string>>(new Set());
+  const [selectedId, setSelectedId] = useState<string | null>(null);
+  const headingRef = useRef<HTMLHeadingElement>(null);
 
   const setBusy = (key: string, busy: boolean) =>
     setPending((current) => {
@@ -73,49 +75,90 @@ export function CeilingMatrix({ users, servers, initial }: CeilingMatrixProps) {
     }
   }
 
+  const selected = users.find((u) => u.id === selectedId) ?? users[0];
+  const levelsOf = (user: CeilingUser) => servers.map((slug) => state[ceilingKey(user.id, slug)] ?? "none");
+  const grantedOf = (user: CeilingUser) => levelsOf(user).filter((level) => level !== "none").length;
+
+  const select = (id: string) => {
+    setSelectedId(id);
+    // Stacked layout: the detail sits under the list, so move focus (and the view) to it.
+    const wide = window.matchMedia("(min-width: 1024px)").matches;
+    requestAnimationFrame(() => headingRef.current?.focus({ preventScroll: wide }));
+  };
+
   return (
-    <div className="overflow-x-auto rounded-card border border-line bg-panel/85">
-      <table className="w-max min-w-full border-collapse text-left">
-        <caption className="sr-only">{t("matrixCaption")}</caption>
-        <thead className="border-b border-line-strong">
-          <tr>
-            <th scope="col" className={`${HEAD} sticky left-0 z-10 min-w-56 bg-panel`}>
-              {t("person")}
-            </th>
-            {servers.map((slug) => (
-              <th key={slug} scope="col" className={HEAD}>
-                <span className="flex items-center gap-2">
-                  <ServiceLogo slug={slug} name={slug} variant="catalog" size="xs" />
-                  <span className="font-mono text-[13px] font-semibold text-fg">{slug}</span>
-                </span>
-              </th>
-            ))}
-          </tr>
-        </thead>
-        <tbody>
-          {users.map((user) => (
-            <tr key={user.id} className="border-t border-line first:border-t-0 hover:bg-white/3">
-              <th scope="row" className="sticky left-0 z-10 min-w-56 truncate bg-panel px-3 py-2.5 text-left text-[13px] font-semibold text-fg">
-                {user.email}
-              </th>
-              {servers.map((slug) => {
-                const key = ceilingKey(user.id, slug);
-                return (
-                  <td key={slug} className="px-3 py-2.5">
-                    <LevelSelect
-                      allowNone
-                      label={t("ceilingLabel", { email: user.email, slug })}
-                      value={state[key] ?? "none"}
-                      disabled={pending.has(key)}
-                      onValueChange={(level) => void change(user, slug, level)}
-                    />
-                  </td>
-                );
-              })}
-            </tr>
-          ))}
-        </tbody>
-      </table>
+    <div className="grid gap-6 lg:grid-cols-[20rem_minmax(0,1fr)] lg:items-start">
+      <nav aria-label={t("accountsLabel")} className="lg:sticky lg:top-6">
+        <ul className="flex flex-col gap-1">
+          {users.map((user) => {
+            const active = user.id === selected?.id;
+            const granted = grantedOf(user);
+            return (
+              <li key={user.id}>
+                <button
+                  type="button"
+                  aria-current={active ? "true" : undefined}
+                  onClick={() => select(user.id)}
+                  className={cn(
+                    "focus-ring flex w-full items-center gap-3 rounded-card border px-3 py-2.5 text-left transition-colors duration-150 ease-switch",
+                    active ? "border-signal/50 bg-signal-wash" : "border-transparent hover:border-line hover:bg-white/4",
+                  )}
+                >
+                  <span aria-hidden className="grid size-8 shrink-0 place-items-center rounded-full bg-guide text-[11px] font-semibold text-signal-fg">
+                    {initialsOf(user.email)}
+                  </span>
+                  <span className="min-w-0 flex-1">
+                    <span className="block truncate text-[13px] font-medium text-fg">{user.email}</span>
+                    <span className="block text-xs text-fg-muted">{t("accessCount", { n: granted, total: servers.length })}</span>
+                  </span>
+                  <CeilingSkyline levels={levelsOf(user)} />
+                </button>
+              </li>
+            );
+          })}
+        </ul>
+      </nav>
+
+      {selected ? (
+        <section aria-labelledby={`${selected.id}-ceilings`} className="rounded-card border border-line bg-panel/85">
+          <header className="flex flex-wrap items-center gap-4 border-b border-line px-5 py-4">
+            <span aria-hidden className="grid size-11 shrink-0 place-items-center rounded-full bg-guide text-sm font-semibold text-signal-fg">
+              {initialsOf(selected.email)}
+            </span>
+            <div className="min-w-0 flex-1">
+              <h2 ref={headingRef} tabIndex={-1} id={`${selected.id}-ceilings`} className="truncate text-base font-semibold text-fg outline-none">
+                {selected.email}
+              </h2>
+              <p className="mt-0.5 text-xs text-fg-muted">{t("detailHint")}</p>
+            </div>
+            <span className="scale-150 origin-right pr-1">
+              <CeilingSkyline levels={levelsOf(selected)} />
+            </span>
+          </header>
+          <ul>
+            {servers.map((slug) => {
+              const key = ceilingKey(selected.id, slug);
+              return (
+                <li
+                  key={slug}
+                  className="flex flex-col gap-2 border-t border-line px-5 py-2.5 first:border-t-0 sm:flex-row sm:items-center sm:justify-between sm:gap-4"
+                >
+                  <span className="flex min-w-0 items-center gap-2.5">
+                    <ServiceLogo slug={slug} name={slug} variant="catalog" size="xs" />
+                    <span className="truncate font-mono text-[13px] font-medium text-fg">{slug}</span>
+                  </span>
+                  <CeilingGauge
+                    label={t("ceilingLabel", { email: selected.email, slug })}
+                    value={state[key] ?? "none"}
+                    disabled={pending.has(key)}
+                    onValueChange={(level) => void change(selected, slug, level)}
+                  />
+                </li>
+              );
+            })}
+          </ul>
+        </section>
+      ) : null}
     </div>
   );
 }

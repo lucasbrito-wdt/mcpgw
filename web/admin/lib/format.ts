@@ -40,3 +40,9 @@ export const KEY_LABEL = localizedRecord<KeyKind>(['personal', 'shared', 'none',
 export const PROBLEM_LABEL = localizedRecord<ConnectionProblem>(['revoked', 'expired', 'scopes'], (key) =>
   translate(getLocale(), labels, `problem_${key}`),
 );
+
+/** Two-letter avatar initials from the email's local part ("ana.souza@x" gives "AS"). */
+export function initialsOf(email: string): string {
+  const parts = email.split("@")[0].split(/[._-]+/).filter(Boolean);
+  return ((parts[0]?.[0] ?? "?") + (parts[1]?.[0] ?? "")).toUpperCase();
+}

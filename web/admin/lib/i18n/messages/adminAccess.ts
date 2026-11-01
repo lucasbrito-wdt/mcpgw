@@ -20,6 +20,9 @@ export const adminAccess = defineMessages({
     person: 'Person',
     ceilingLabel: 'Ceiling of {email} on {slug}',
     saveError: 'Could not save the ceiling. Try again.',
+    accessCount: 'Access to {n} of {total} servers',
+    accountsLabel: 'Accounts',
+    detailHint: 'Pick the ceiling on each server. Everything below it is allowed too.',
   },
   'pt-BR': {
     pageTitle: 'Acesso (admin)',
@@ -39,5 +42,8 @@ export const adminAccess = defineMessages({
     person: 'Pessoa',
     ceilingLabel: 'Teto de {email} em {slug}',
     saveError: 'Não foi possível salvar o teto. Tente de novo.',
+    accessCount: 'Acesso a {n} de {total} servidores',
+    accountsLabel: 'Contas',
+    detailHint: 'Escolha o teto em cada servidor. Tudo abaixo dele também fica liberado.',
   },
 });

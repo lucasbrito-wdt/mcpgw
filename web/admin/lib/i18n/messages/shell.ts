@@ -27,6 +27,8 @@ export const shell = defineMessages({
     navUsers: 'Users',
     navAdminLog: 'Admin log',
     navSettings: 'Settings',
+    account: 'Account',
+    signOut: 'Sign out',
   },
   'pt-BR': {
     skipToContent: 'Pular para o conteúdo',
@@ -54,5 +56,7 @@ export const shell = defineMessages({
     navUsers: 'Usuários',
     navAdminLog: 'Log admin',
     navSettings: 'Configurações',
+    account: 'Conta',
+    signOut: 'Sair',
   },
 });

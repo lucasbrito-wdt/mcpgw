@@ -1,7 +1,7 @@
 // Ported from design/v5/src/components/shell/AppShell.tsx on 2026-10-31.
 "use client";
 
-import { Menu } from "lucide-react";
+import { LogOut, Menu } from "lucide-react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { useEffect, useState, type ReactNode } from "react";
@@ -10,7 +10,9 @@ import { BootSplash } from "../brand/BootSplash";
 import { McpgwTile } from "../brand/McpgwMark";
 import { Button } from "../ui/button";
 import { Drawer } from "../ui/dialog";
+import { Popover } from "../ui/popover";
 import { api } from "../../lib/api";
+import { initialsOf } from "../../lib/format";
 import { useT } from "../../lib/i18n";
 import { shell } from "../../lib/i18n/messages/shell";
 import type { Me } from "../../lib/types";
@@ -29,11 +31,6 @@ export interface AppShellProps {
 
 /** Surfaces whose session was already confirmed in this document: later page changes skip the splash. */
 const verifiedSurfaces = new Set<Surface>();
-
-function initialsOf(email: string): string {
-  const parts = email.split("@")[0].split(/[._-]+/).filter(Boolean);
-  return ((parts[0]?.[0] ?? "?") + (parts[1]?.[0] ?? "")).toUpperCase();
-}
 
 function Wordmark({ href }: { href: string }) {
   return (
@@ -118,8 +115,39 @@ function SidebarBody({ surface, me, reviewCount, onNavigate }: SidebarBodyProps)
         ))}
       </nav>
 
-      <div className="mt-auto flex flex-col gap-1 border-t border-line pt-3">
-        <div className="flex items-center gap-2.5 px-2.5 py-2">
+      <div className="mt-auto border-t border-line pt-3">
+        <AccountMenu surface={surface} me={me} />
+      </div>
+    </div>
+  );
+}
+
+/** Account block at the bottom of the sidebar; opens a menu with the language switch and sign-out. */
+function AccountMenu({ surface, me }: { surface: Surface; me: Me | null }) {
+  const t = useT(shell);
+  const [open, setOpen] = useState(false);
+  const [signingOut, setSigningOut] = useState(false);
+
+  async function signOut() {
+    setSigningOut(true);
+    // Leave even if the request fails: the login page re-checks the session anyway.
+    await api(surface, "/session", { method: "DELETE" }).catch(() => {});
+    // eslint-disable-next-line @next/next/no-location-assign-relative-destination -- full reload drops all in-memory session state
+    window.location.assign(`/${surface}/login/`);
+  }
+
+  return (
+    <Popover
+      open={open}
+      onOpenChange={setOpen}
+      title={t("account")}
+      align="start"
+      className="w-56"
+      trigger={
+        <button
+          type="button"
+          className="focus-ring flex w-full items-center gap-2.5 rounded-control px-2.5 py-2 text-left transition-colors duration-150 ease-switch hover:bg-white/5"
+        >
           <span className="grid size-7 shrink-0 place-items-center rounded-full bg-guide text-[11px] font-semibold text-signal-fg" aria-hidden>
             {me ? initialsOf(me.email) : ""}
           </span>
@@ -127,10 +155,20 @@ function SidebarBody({ surface, me, reviewCount, onNavigate }: SidebarBodyProps)
             <span className="block min-h-4 truncate text-[13px] font-medium text-fg">{me?.email ?? ""}</span>
             <span className="block truncate text-xs text-fg-muted">{surface === "admin" || me?.is_admin ? t("admin") : t("member")}</span>
           </span>
+        </button>
+      }
+    >
+      <div className="flex flex-col gap-3">
+        <div className="flex items-center justify-between gap-2 px-1">
+          <span className="text-xs text-fg-muted">{t("language")}</span>
+          <LocaleSwitcher />
         </div>
-        <LocaleSwitcher className="mx-2.5 self-start" />
+        <Button variant="ghost" size="sm" className="justify-start" disabled={signingOut} onClick={signOut}>
+          <LogOut aria-hidden />
+          {t("signOut")}
+        </Button>
       </div>
-    </div>
+    </Popover>
   );
 }
 
