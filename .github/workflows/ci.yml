@@ -68,7 +68,7 @@ jobs:
   # creates the mcpgw_e2e database through psql and boots the gateway and the fake upstream itself.
   e2e:
     needs: [go, web]
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04 # Playwright 1.55 has no browsers for ubuntu 26.04 yet
     timeout-minutes: 25
     defaults:
       run:
