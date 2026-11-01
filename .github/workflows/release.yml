@@ -1,0 +1,326 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - scripts/install.sh
+      - scripts/install.ps1
+      - .github/workflows/release.yml
+      - cmd/mcpgw/**
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  version:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      version: ${{ steps.v.outputs.version }}
+    steps:
+      - id: v
+        run: |
+          if [ "$GITHUB_REF_TYPE" = "tag" ]; then
+            echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+          else
+            echo "version=0.0.0-${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
+          fi
+
+  admin:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: web/admin
+    steps:
+      - uses: actions/checkout@v7
+      - uses: pnpm/action-setup@v6
+        with:
+          package_json_file: web/admin/package.json
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: web/admin/pnpm-lock.yaml
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm build
+      - uses: actions/upload-artifact@v7
+        with:
+          name: admin-out
+          path: web/admin/out
+          if-no-files-found: error
+
+  build:
+    needs: [version, admin]
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { goos: linux, goarch: amd64, runner: ubuntu-latest, march: x86_64, rust_target: x86_64-unknown-linux-gnu }
+          - { goos: linux, goarch: arm64, runner: ubuntu-24.04-arm, march: aarch64, rust_target: aarch64-unknown-linux-gnu }
+          - { goos: darwin, goarch: arm64, runner: macos-latest, rust_target: aarch64-apple-darwin }
+          # Cross-compiled on the arm64 macOS runner.
+          - { goos: darwin, goarch: amd64, runner: macos-latest, rust_target: x86_64-apple-darwin }
+          - { goos: windows, goarch: amd64, runner: windows-latest, rust_target: x86_64-pc-windows-msvc }
+    env:
+      VERSION: ${{ needs.version.outputs.version }}
+      GOOS: ${{ matrix.goos }}
+      GOARCH: ${{ matrix.goarch }}
+      CGO_ENABLED: "0" # no cgo in the module
+      EXE: ${{ matrix.goos == 'windows' && '.exe' || '' }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache: true
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: internal/sandbox/montyrs/worker -> target
+          key: ${{ matrix.rust_target }}
+      - uses: actions/download-artifact@v8
+        with:
+          name: admin-out
+          path: web/admin/out
+      - name: Build gateway
+        run: |
+          touch web/admin/out/.keep
+          mkdir -p stage
+          go build -trimpath -ldflags "-s -w -X main.version=${VERSION}" -o "stage/mcpgw${EXE}" ./cmd/mcpgw
+      # cargo runs from the crate dir: it reads .cargo/config.toml (static CRT on Windows) from the cwd, not from --manifest-path.
+      - name: Build worker
+        if: matrix.goos != 'linux'
+        working-directory: internal/sandbox/montyrs/worker
+        run: |
+          rustup target add "${{ matrix.rust_target }}"
+          cargo build --release --target "${{ matrix.rust_target }}"
+          cp "target/${{ matrix.rust_target }}/release/montyrs-worker${EXE}" "$GITHUB_WORKSPACE/stage/"
+      # manylinux_2_28 pins the glibc baseline at 2.28 so the worker runs on RHEL/Alma 9 and older. Not musl: the seccomp allowlist is tuned for glibc.
+      - name: Build worker (manylinux_2_28)
+        if: matrix.goos == 'linux'
+        run: |
+          docker run --rm -v "$GITHUB_WORKSPACE:/work" -w /work/internal/sandbox/montyrs/worker \
+            -e HOST_UID="$(id -u)" -e HOST_GID="$(id -g)" -e RUST_TARGET="${{ matrix.rust_target }}" \
+            quay.io/pypa/manylinux_2_28_${{ matrix.march }} bash -euxc '
+              curl --proto "=https" --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain stable --target "$RUST_TARGET"
+              . "$HOME/.cargo/env"
+              cargo build --release --target "$RUST_TARGET"
+              chown -R "$HOST_UID:$HOST_GID" target
+            '
+          cp "internal/sandbox/montyrs/worker/target/${{ matrix.rust_target }}/release/montyrs-worker" stage/
+      - name: Check glibc baseline
+        if: matrix.goos == 'linux'
+        run: |
+          newest="$(objdump -T stage/montyrs-worker | grep -o 'GLIBC_[0-9.]*' | sort -Vu | tail -1)"
+          echo "newest glibc symbol: $newest"
+          [ "$(printf '%s\n' "${newest#GLIBC_}" 2.28 | sort -V | tail -1)" = "2.28" ] || { echo "worker needs glibc newer than 2.28"; exit 1; }
+      - name: Package
+        run: |
+          cp LICENSE NOTICE README.md stage/
+          name="mcpgw_${VERSION}_${GOOS}_${GOARCH}"
+          mkdir -p dist
+          if [ "$GOOS" = "windows" ]; then
+            (cd stage && 7z a -tzip "../dist/${name}.zip" . > /dev/null)
+          else
+            tar -C stage -czf "dist/${name}.tar.gz" .
+          fi
+          ls -l dist
+      - uses: actions/upload-artifact@v7
+        with:
+          name: archive-${{ matrix.goos }}-${{ matrix.goarch }}
+          path: dist/*
+          if-no-files-found: error
+
+  release:
+    if: github.ref_type == 'tag'
+    needs: [version, build]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: archive-*
+          merge-multiple: true
+          path: dist
+      - name: Checksums
+        working-directory: dist
+        run: |
+          sha256sum mcpgw_* > SHA256SUMS
+          cat SHA256SUMS
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.version.outputs.version }}
+        run: |
+          flags=()
+          case "$VERSION" in *-*) flags+=(--prerelease) ;; esac
+          gh release create "$GITHUB_REF_NAME" dist/* scripts/install.sh scripts/install.ps1 \
+            --verify-tag --title "$GITHUB_REF_NAME" --generate-notes "${flags[@]}"
+
+  smoke:
+    if: github.ref_type != 'tag'
+    needs: [version, build]
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { runner: ubuntu-latest, artifact: archive-linux-amd64 }
+          - { runner: macos-latest, artifact: archive-darwin-arm64 }
+          - { runner: windows-latest, artifact: archive-windows-amd64 }
+    env:
+      VERSION: ${{ needs.version.outputs.version }}
+      HEALTH_URL: http://127.0.0.1:8787/healthz
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v8
+        with:
+          name: ${{ matrix.artifact }}
+          path: release-src
+
+      # The release dir mimics GitHub Releases: <base>/v<version>/{archive,SHA256SUMS}.
+      - name: Assemble release dir (unix)
+        if: runner.os != 'Windows'
+        run: |
+          rel="$RUNNER_TEMP/release/v${VERSION}"
+          mkdir -p "$rel"
+          cp release-src/* "$rel/"
+          (cd "$rel" && shasum -a 256 mcpgw_* > SHA256SUMS)
+          ls -R "$RUNNER_TEMP/release"
+
+      - name: Assemble release dir (windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $rel = Join-Path $env:RUNNER_TEMP "release\v$env:VERSION"
+          New-Item -ItemType Directory -Path $rel -Force | Out-Null
+          Copy-Item release-src\* $rel
+          $lines = Get-ChildItem $rel -File -Filter 'mcpgw_*' | ForEach-Object {
+            "$((Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLower())  $($_.Name)"
+          }
+          # No BOM, LF endings: sha256sum-compatible.
+          [IO.File]::WriteAllText("$rel\SHA256SUMS", ($lines -join "`n") + "`n")
+          Get-ChildItem $rel -Recurse | Select-Object FullName
+
+      # ---- Linux: existing Postgres (service container), systemd ----
+      - name: Linux install, upgrade, uninstall
+        if: runner.os == 'Linux'
+        run: |
+          set -euo pipefail
+          release="$RUNNER_TEMP/release"
+          # Service containers do not exist on macOS/Windows runners, so Postgres 18 is started here.
+          docker run -d --name pg -e POSTGRES_PASSWORD=postgres -p 5432:5432 postgres:18
+          until docker exec pg pg_isready -U postgres; do sleep 2; done
+          docker exec pg psql -U postgres -c 'CREATE DATABASE mcpgw_smoke'
+          db_url='postgres://postgres:postgres@localhost:5432/mcpgw_smoke?sslmode=disable'
+          install() { sudo ./scripts/install.sh --non-interactive --base-url "$release" --version "$VERSION" "$@"; }
+          wait_healthy() { curl --fail --silent --show-error --retry 30 --retry-delay 2 --retry-connrefused "$HEALTH_URL"; echo; }
+
+          install --database-url "$db_url"
+          wait_healthy
+          mcpgw version | tee /dev/stderr | grep -F "$VERSION"
+          systemctl is-active mcpgw
+
+          echo "--- upgrade (rerun keeps config)"
+          install
+          wait_healthy
+          systemctl is-active mcpgw
+
+          echo "--- uninstall --purge"
+          sudo ./scripts/install.sh --non-interactive --uninstall --purge
+          ! systemctl is-active --quiet mcpgw
+          test ! -e /etc/mcpgw/mcpgw.env
+
+          echo "--- fresh install with the monty engine"
+          install --database-url "$db_url" --engine monty
+          wait_healthy
+          sudo grep -Fx 'MCPGW_SANDBOX_ENGINE=monty' /etc/mcpgw/mcpgw.env
+          test -x /opt/mcpgw/bin/montyrs-worker
+          sudo ./scripts/install.sh --non-interactive --uninstall --purge
+
+      # ---- macOS: Homebrew postgresql@18, LaunchDaemon ----
+      - name: macOS install, upgrade, uninstall
+        if: runner.os == 'macOS'
+        run: |
+          set -euo pipefail
+          release="$RUNNER_TEMP/release"
+          install() { sudo ./scripts/install.sh --non-interactive --base-url "$release" --version "$VERSION" "$@"; }
+          wait_healthy() { curl --fail --silent --show-error --retry 30 --retry-delay 2 --retry-connrefused "$HEALTH_URL"; echo; }
+
+          install --install-postgres
+          wait_healthy
+          /usr/local/bin/mcpgw version | tee /dev/stderr | grep -F "$VERSION"
+          sudo launchctl print system/io.github.lucasbrito-wdt.mcpgw > /dev/null
+
+          echo "--- upgrade"
+          install
+          wait_healthy
+
+          echo "--- uninstall --purge"
+          sudo ./scripts/install.sh --non-interactive --uninstall --purge
+          test ! -e /Library/LaunchDaemons/io.github.lucasbrito-wdt.mcpgw.plist
+          test ! -e /usr/local/etc/mcpgw/mcpgw.env
+
+      # ---- Windows: winget/EDB PostgreSQL 18, Windows Service ----
+      # The runner image ships its own PostgreSQL service on 5432; stop it so the installer's instance is the one in use.
+      - name: Windows install, upgrade, uninstall
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          Get-Service 'postgresql*' -ErrorAction SilentlyContinue | Stop-Service -Force -ErrorAction SilentlyContinue
+          $release = Join-Path $env:RUNNER_TEMP 'release'
+          $exe = 'C:\Program Files\mcpgw\mcpgw.exe'
+          function Wait-Healthy {
+            for ($i = 0; $i -lt 30; $i++) {
+              try { return (Invoke-WebRequest $env:HEALTH_URL -UseBasicParsing).StatusCode } catch { Start-Sleep 2 }
+            }
+            throw "healthz never answered"
+          }
+          function Invoke-Installer { & .\scripts\install.ps1 -NonInteractive -BaseUrl $release -Version $env:VERSION @args; if ($LASTEXITCODE) { throw "install.ps1 exit $LASTEXITCODE" } }
+
+          Invoke-Installer -InstallPostgres
+          Wait-Healthy
+          $out = & $exe version
+          if ($out -notmatch [regex]::Escape($env:VERSION)) { throw "unexpected version: $out" }
+          if ((Get-Service mcpgw).Status -ne 'Running') { throw 'service not running' }
+
+          Write-Host '--- upgrade'
+          Invoke-Installer
+          Wait-Healthy
+
+          Write-Host '--- uninstall --purge'
+          & .\scripts\install.ps1 -NonInteractive -Uninstall -Purge
+          if (Get-Service mcpgw -ErrorAction SilentlyContinue) { throw 'service still registered' }
+          if (Test-Path "$env:ProgramData\mcpgw\mcpgw.env") { throw 'config still present' }
+
+      - name: Diagnostics (linux)
+        if: failure() && runner.os == 'Linux'
+        run: |
+          sudo journalctl -u mcpgw --no-pager -n 100 || true
+          sudo systemctl status mcpgw --no-pager || true
+      - name: Diagnostics (macos)
+        if: failure() && runner.os == 'macOS'
+        run: sudo tail -n 100 /usr/local/var/log/mcpgw/mcpgw.log || true
+      - name: Diagnostics (windows)
+        if: failure() && runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          Get-Content "$env:ProgramData\mcpgw\logs\*" -Tail 100 -ErrorAction SilentlyContinue
+          Get-Service mcpgw -ErrorAction SilentlyContinue | Format-List *
