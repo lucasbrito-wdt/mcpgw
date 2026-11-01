@@ -11,7 +11,7 @@
   Must run elevated. Compatible with Windows PowerShell 5.1 and PowerShell 7.
 
 .PARAMETER Version        Release to install, with or without leading "v" (default: latest).
-.PARAMETER BaseUrl        Download root (default: GitHub releases) or a local directory.
+.PARAMETER BaseUrl        Download root (https only; default: GitHub releases) or a local directory.
 .PARAMETER DatabaseUrl    Existing Postgres 18+ URL. Mutually exclusive with -InstallPostgres.
 .PARAMETER InstallPostgres Install PostgreSQL 18 through winget (unattended).
 .PARAMETER PublicUrl      MCPGW_PUBLIC_URL (default http://<listen address>).
@@ -99,7 +99,7 @@ function Test-IsAdmin {
 function Get-ElevatedCommand {
     if ($scriptPath) {
         $parts = foreach ($key in $PSBoundParameters.Keys) {
-            if ($key -eq 'AdminPassword') { continue }
+            if ($key -in @('AdminPassword', 'DatabaseUrl')) { continue }  # never echo secrets
             $value = $PSBoundParameters[$key]
             if ($value -is [System.Management.Automation.SwitchParameter]) { "-$key" } else { "-$key '$value'" }
         }
@@ -152,8 +152,8 @@ function Invoke-Native([string]$Exe, [string[]]$ArgList, [string]$StdIn, [hashta
     return @{ ExitCode = $code; Output = $text.Trim() }
 }
 
-function Set-StrictAcl([string]$Path, [string[]]$ExtraGrants) {
-    $grants = @('*S-1-5-18:(F)', '*S-1-5-32-544:(F)') + $ExtraGrants
+function Set-StrictAcl([string]$Path, [string[]]$ExtraGrants, [string]$Inherit = '') {
+    $grants = @("*S-1-5-18:${Inherit}(F)", "*S-1-5-32-544:${Inherit}(F)") + $ExtraGrants
     $arguments = @($Path, '/inheritance:r', '/grant:r') + $grants
     $result = Invoke-Native 'icacls.exe' $arguments
     if ($result.ExitCode -ne 0) { throw "icacls failed on ${Path}: $($result.Output)" }
@@ -164,6 +164,38 @@ function Write-SecretFile([string]$Path, [string]$Content, [string[]]$ExtraGrant
     [IO.File]::WriteAllText($Path, '')
     Set-StrictAcl $Path $ExtraGrants
     [IO.File]::WriteAllText($Path, $Content, (New-Object Text.UTF8Encoding($false)))
+}
+
+function Get-PathItem([string]$Path) { return Get-Item -LiteralPath $Path -Force -ErrorAction SilentlyContinue }
+
+# Refuses reparse points and anything not owned by SYSTEM/Administrators (no-op when the path is absent).
+function Assert-TrustedPath([string]$Path) {
+    $item = Get-PathItem $Path
+    if (-not $item) { return }
+    if ($item.Attributes.HasFlag([IO.FileAttributes]::ReparsePoint)) { throw "$Path is a reparse point (junction/symlink); refusing to continue." }
+    $owner = (Get-Acl -LiteralPath $Path).GetOwner([Security.Principal.SecurityIdentifier]).Value
+    if (@('S-1-5-18', 'S-1-5-32-544') -notcontains $owner) { throw "$Path is owned by $owner, not SYSTEM/Administrators; refusing to continue." }
+}
+
+function Assert-DataDirsTrusted {
+    foreach ($path in @($DataDir, $LogDir, $EnvFile, $PgSuperFile)) { Assert-TrustedPath $path }
+}
+
+# Random temp dir readable only by SYSTEM/Administrators.
+function New-SecureWorkDir {
+    $dir = Join-Path ([IO.Path]::GetTempPath()) ('mcpgw-install-' + [Guid]::NewGuid().ToString('N'))
+    New-Item -ItemType Directory -Path $dir | Out-Null
+    Set-StrictAcl $dir @() '(OI)(CI)'
+    return $dir
+}
+
+# Removes a tree without ever following junctions/symlinks (cmd rmdir unlinks them instead).
+function Remove-DirectoryTree([string]$Path) {
+    $item = Get-PathItem $Path
+    if (-not $item) { return }
+    if ($item.Attributes.HasFlag([IO.FileAttributes]::ReparsePoint) -and -not $item.PSIsContainer) { Remove-Item -LiteralPath $Path -Force; return }
+    $result = Invoke-Native 'cmd.exe' @('/c', 'rmdir', '/s', '/q', $Path)
+    if ($result.ExitCode -ne 0) { throw "could not remove ${Path}: $($result.Output)" }
 }
 
 function Read-EnvValue([string]$Path, [string]$Key) {
@@ -212,6 +244,36 @@ function Resolve-ReleaseVersion([string]$Requested, [string]$Root) {
     return ([string]$release.tag_name).TrimStart('v')
 }
 
+function Assert-HttpsUrl([string]$Url) {
+    if ($Url -notmatch '^https://') { throw "refusing non-https URL: $Url" }
+}
+
+# Downloads over https only; redirects are followed manually so an https->http downgrade is refused.
+function Save-HttpsFile([string]$Url, [string]$Dest) {
+    for ($hop = 0; $hop -lt 5; $hop++) {
+        Assert-HttpsUrl $Url
+        $request = [Net.HttpWebRequest]::Create($Url)
+        $request.AllowAutoRedirect = $false
+        $request.UserAgent = 'mcpgw-installer'
+        $response = $request.GetResponse()
+        try {
+            $status = [int]$response.StatusCode
+            if ($status -ge 300 -and $status -lt 400) {
+                $location = [string]$response.Headers['Location']
+                if (-not $location) { throw "HTTP $status without Location from $Url" }
+                $Url = [Uri]::new([Uri]$Url, $location).AbsoluteUri
+                continue
+            }
+            if ($status -ne 200) { throw "HTTP $status from $Url" }
+            $source = $response.GetResponseStream()
+            $target = [IO.File]::Create($Dest)
+            try { $source.CopyTo($target) } finally { $target.Dispose(); $source.Dispose() }
+            return
+        } finally { $response.Dispose() }
+    }
+    throw 'too many redirects'
+}
+
 # Fetches one release asset to $Dest from a URL root or a local directory (tries <root>\v<ver>\ then <root>\).
 function Get-ReleaseAsset([string]$Root, [string]$Ver, [string]$Name, [string]$Dest) {
     if (Test-Path -LiteralPath $Root -PathType Container) {
@@ -221,7 +283,8 @@ function Get-ReleaseAsset([string]$Root, [string]$Ver, [string]$Name, [string]$D
         throw "$Name not found under $Root"
     }
     $url = "$($Root.TrimEnd('/'))/v$Ver/$Name"
-    try { Invoke-WebRequest -UseBasicParsing -Uri $url -OutFile $Dest -Headers @{ 'User-Agent' = 'mcpgw-installer' } }
+    Assert-HttpsUrl $url
+    try { Save-HttpsFile $url $Dest }
     catch { throw "download failed: $url ($($_.Exception.Message))" }
 }
 
@@ -301,8 +364,16 @@ function Register-GatewayService {
 }
 
 function Initialize-DataDirs {
-    New-Item -ItemType Directory -Force -Path $DataDir, $LogDir | Out-Null
+    # C:\ProgramData lets Users create/write children: take the dir over before trusting anything in it.
+    if (Get-PathItem $DataDir) { Assert-TrustedPath $DataDir } else { New-Item -ItemType Directory -Path $DataDir | Out-Null }
+    $owner = Invoke-Native 'icacls.exe' @($DataDir, '/setowner', '*S-1-5-32-544')
+    if ($owner.ExitCode -ne 0) { throw "icacls /setowner failed on ${DataDir}: $($owner.Output)" }
     $grantee = if (Test-ServiceExists $ServiceName) { $ServiceAccount } else { $null }
+    $dirGrants = @()
+    if ($grantee) { $dirGrants = @("${grantee}:(RX)") }
+    Set-StrictAcl $DataDir $dirGrants '(OI)(CI)'
+    Assert-DataDirsTrusted
+    New-Item -ItemType Directory -Force -Path $LogDir | Out-Null
     if ($grantee) {
         $result = Invoke-Native 'icacls.exe' @($LogDir, '/grant', "${grantee}:(OI)(CI)(M)")
         if ($result.ExitCode -ne 0) { throw "icacls failed on ${LogDir}: $($result.Output)" }
@@ -334,7 +405,13 @@ function Assert-ExistingPostgres([string]$Url) {
         Write-Warning 'psql.exe not found: skipping connection and version check; migrate will fail if the URL is wrong.'
         return
     }
-    $result = Invoke-Psql @($Url, '-tA', '-c', 'SHOW server_version_num') $null $null
+    # Keep the password out of psql's argv: strip it from the URL and pass it through PGPASSWORD.
+    $password = $null
+    if ($Url -match '^([a-z][a-z0-9+.-]*://[^:@/]+):([^@]*)@(.*)$') {
+        $password = [Uri]::UnescapeDataString($Matches[2])
+        $Url = "$($Matches[1])@$($Matches[3])"
+    }
+    $result = Invoke-Psql @($Url, '-tA', '-c', 'SHOW server_version_num') $null $password
     if ($result.ExitCode -ne 0) { throw 'cannot connect to the given database URL (check host, credentials and network).' }
     if ([int]$result.Output -lt 180000) { throw "PostgreSQL 18+ is required (server_version_num=$($result.Output))." }
 }
@@ -347,22 +424,36 @@ function Test-PortListening([int]$Port) {
     } catch { return $false } finally { $client.Close() }
 }
 
+function Assert-EdbSignature([string]$Path) {
+    $signature = Get-AuthenticodeSignature -LiteralPath $Path
+    if ($signature.Status -ne 'Valid') { throw "EDB installer signature is not valid (status: $($signature.Status)); aborting." }
+    if ($signature.SignerCertificate.Subject -notlike '*EnterpriseDB*') { throw "EDB installer is not signed by EnterpriseDB (signer: $($signature.SignerCertificate.Subject)); aborting." }
+}
+
 # Runs the EDB installer: through winget when present, else downloads it directly.
-function Invoke-PostgresInstaller([string]$Override) {
-    if (Get-Command 'winget.exe' -ErrorAction SilentlyContinue) {
-        $result = Invoke-Native 'winget.exe' @('install', '--id', 'PostgreSQL.PostgreSQL.18', '-e', '--silent',
-            '--accept-package-agreements', '--accept-source-agreements', '--override', $Override)
-        if ($result.ExitCode -eq 0) { return }
-        Write-Warning 'winget failed; falling back to the EDB installer.'
-    }
+# The superuser password travels in a restricted option file, never in argv.
+function Invoke-PostgresInstaller([string]$SuperPassword) {
     $url = Resolve-Setting '' 'EDB_URL' $EdbInstallerUrl
-    $installer = Join-Path ([IO.Path]::GetTempPath()) 'mcpgw-postgresql-installer.exe'
+    Assert-HttpsUrl $url
+    $workDir = New-SecureWorkDir
     try {
-        try { Invoke-WebRequest -UseBasicParsing -Uri $url -OutFile $installer }
+        $optionFile = Join-Path $workDir 'pg.options'
+        $options = "mode=unattended`r`nsuperpassword=$SuperPassword`r`nservicename=$PgServiceName`r`nserverport=5432`r`n"
+        Write-SecretFile $optionFile $options @()
+        # winget re-splits --override, so only use it when the path needs no quoting.
+        if ((Get-Command 'winget.exe' -ErrorAction SilentlyContinue) -and $optionFile -notmatch '\s') {
+            $result = Invoke-Native 'winget.exe' @('install', '--id', 'PostgreSQL.PostgreSQL.18', '-e', '--silent',
+                '--accept-package-agreements', '--accept-source-agreements', '--override', "--optionfile $optionFile")
+            if ($result.ExitCode -eq 0) { return }
+            Write-Warning 'winget failed; falling back to the EDB installer.'
+        }
+        $installer = Join-Path $workDir 'postgresql-installer.exe'
+        try { Save-HttpsFile $url $installer }
         catch { throw "could not download the EDB installer from $url ($($_.Exception.Message)). Install PostgreSQL 18 manually and re-run with -DatabaseUrl, or set MCPGW_INSTALL_EDB_URL." }
-        $process = Start-Process -FilePath $installer -ArgumentList $Override -Wait -PassThru
+        Assert-EdbSignature $installer
+        $process = Start-Process -FilePath $installer -ArgumentList "--optionfile `"$optionFile`"" -Wait -PassThru
         if ($process.ExitCode -ne 0) { throw "EDB installer exited with code $($process.ExitCode)." }
-    } finally { Remove-Item -LiteralPath $installer -Force -ErrorAction SilentlyContinue }
+    } finally { Remove-Item -LiteralPath $workDir -Recurse -Force -ErrorAction SilentlyContinue }
 }
 
 function Install-PostgresWithWinget {
@@ -375,7 +466,7 @@ function Install-PostgresWithWinget {
     }
     $superPassword = New-RandomPassword 24
     Write-Step 'Installing PostgreSQL 18 (this takes a few minutes)'
-    Invoke-PostgresInstaller "--mode unattended --superpassword $superPassword --servicename $PgServiceName --serverport 5432"
+    Invoke-PostgresInstaller $superPassword
     New-Item -ItemType Directory -Force -Path $DataDir | Out-Null
     Write-SecretFile $PgSuperFile $superPassword @()
     return $superPassword
@@ -416,7 +507,7 @@ function Resolve-DatabaseUrl($Cfg) {
         if ($Cfg.NonInteractive) { throw 'pass -DatabaseUrl <postgres url> or -InstallPostgres (non-interactive mode).' }
         $answer = Read-Host 'PostgreSQL 18+: [1] install it now via winget, [2] use an existing database URL (1/2)'
         if ($answer -eq '2') {
-            $Cfg.DatabaseUrl = Read-Host 'Database URL (postgres://user:pass@host:5432/db)'
+            $Cfg.DatabaseUrl = ConvertTo-PlainText (Read-Host 'Database URL (postgres://user:pass@host:5432/db)' -AsSecureString)
             if (-not $Cfg.DatabaseUrl) { throw 'empty database URL.' }
             Assert-ExistingPostgres $Cfg.DatabaseUrl
             return $Cfg.DatabaseUrl
@@ -517,8 +608,8 @@ function Show-Summary($Cfg, [string]$Ver) {
 }
 
 function Invoke-Install($Cfg) {
-    $workDir = Join-Path ([IO.Path]::GetTempPath()) ("mcpgw-install-" + [Guid]::NewGuid().ToString('N'))
-    New-Item -ItemType Directory -Path $workDir | Out-Null
+    Assert-DataDirsTrusted  # fail before touching binaries or the running service
+    $workDir = New-SecureWorkDir
     try {
         $ver = Resolve-ReleaseVersion $Cfg.Version $Cfg.BaseUrl
         $extractDir = Get-VerifiedRelease $Cfg.BaseUrl $ver $workDir
@@ -550,7 +641,7 @@ function Invoke-Uninstall($Cfg) {
     if (Test-Path -LiteralPath $InstallDir) { Remove-Item -LiteralPath $InstallDir -Recurse -Force }
     Update-MachinePath $InstallDir $false
     if ($Cfg.Purge) { Write-Warning "Purging $DataDir deletes MCPGW_MASTER_KEY: the data in the database can no longer be decrypted." }
-    if ($Cfg.Purge -and (Test-Path -LiteralPath $DataDir)) { Remove-Item -LiteralPath $DataDir -Recurse -Force }
+    if ($Cfg.Purge) { Remove-DirectoryTree $DataDir }
     Write-Host 'mcpgw removed. The PostgreSQL database and server were not touched.'
     if (-not $Cfg.Purge) { Write-Host "Config and logs kept in $DataDir (use -Purge to remove)." }
 }

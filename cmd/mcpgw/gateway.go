@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -17,6 +18,7 @@ import (
 	"github.com/lucasbrito-wdt/mcpgw/internal/catalog"
 	"github.com/lucasbrito-wdt/mcpgw/internal/codemode"
 	"github.com/lucasbrito-wdt/mcpgw/internal/config"
+	"github.com/lucasbrito-wdt/mcpgw/internal/i18n"
 	"github.com/lucasbrito-wdt/mcpgw/internal/mcpserver"
 	"github.com/lucasbrito-wdt/mcpgw/internal/oauth"
 	"github.com/lucasbrito-wdt/mcpgw/internal/policy"
@@ -29,6 +31,16 @@ import (
 	"github.com/lucasbrito-wdt/mcpgw/internal/vault"
 	adminweb "github.com/lucasbrito-wdt/mcpgw/web/admin"
 )
+
+// wrapMasterKeyMismatch turns a vault decryption failure into an actionable message, keeping err in the chain.
+func wrapMasterKeyMismatch(err error) error {
+	if !errors.Is(err, vault.ErrDecrypt) {
+		return err
+	}
+	return fmt.Errorf("%w: %w", i18n.T(
+		config.EnvMasterKey+" does not match the key that encrypted this database: restore the original mcpgw.env ("+config.EnvMasterKey+") or point "+config.EnvDatabaseURL+" at an empty database",
+		config.EnvMasterKey+" não corresponde à chave que criptografou este banco: restaure o mcpgw.env original ("+config.EnvMasterKey+") ou aponte "+config.EnvDatabaseURL+" para um banco vazio"), err)
+}
 
 // vaultKeyID names the master key version used to seal secrets (see vault.KeyID for rotation).
 const vaultKeyID = "k1"
@@ -80,7 +92,7 @@ func newGateway(ctx context.Context, cfg *config.Config, log *slog.Logger) (gw *
 	}
 	gw.oauth, err = oauth.New(ctx, oauth.Options{PublicURL: cfg.PublicURL, Pool: gw.pool, Sealer: v, Logger: log})
 	if err != nil {
-		return gw, err
+		return gw, wrapMasterKeyMismatch(err)
 	}
 	if gw.policy, err = policy.New(ctx, gw.pool); err != nil {
 		return gw, err

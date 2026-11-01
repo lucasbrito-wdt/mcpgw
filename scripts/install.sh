@@ -20,7 +20,7 @@ usage() {
 Usage: install.sh [options]
 
   --version V            release to install (default: latest; required with a custom --base-url)
-  --base-url URL|DIR     download source, files at <base>/v<version>/<file> (default: $DEFAULT_BASE_URL)
+  --base-url URL|DIR     https:// URL or local dir; files at <base>/v<version>/<file> (default: $DEFAULT_BASE_URL)
   --database-url URL     use an existing Postgres $PG_MAJOR+ database
   --install-postgres     install Postgres $PG_MAJOR locally and create role/db "$DB_ROLE"
   --public-url URL       public URL of the gateway (default: http://<listen-addr>)
@@ -34,8 +34,9 @@ Usage: install.sh [options]
   --purge                with --uninstall: also remove config, logs and the service user
   -h, --help             this help
 
-Every option has an env var MCPGW_INSTALL_<NAME> (VERSION, BASE_URL, DATABASE_URL, INSTALL_POSTGRES=1,
-PUBLIC_URL, LISTEN_ADDR, ENGINE, ADMIN_EMAIL, ADMIN_PASSWORD, NON_INTERACTIVE=1, NO_SERVICE=1).
+Every option except --uninstall, --purge and --help also has an env var MCPGW_INSTALL_<NAME> (VERSION,
+BASE_URL, DATABASE_URL, INSTALL_POSTGRES=1, PUBLIC_URL, LISTEN_ADDR, ENGINE, ADMIN_EMAIL, ADMIN_PASSWORD,
+NON_INTERACTIVE=1, NO_SERVICE=1). Run as root (sudo sh install.sh) to pass secrets through the environment.
 The database is never dropped; uninstall prints how to do it by hand.
 USAGE
 }
@@ -104,6 +105,10 @@ parse_args() {
   [ "$PURGE" = 0 ] || [ "$UNINSTALL" = 1 ] || die "--purge only makes sense with --uninstall"
   [ -z "$DATABASE_URL" ] || [ "$INSTALL_POSTGRES" = 0 ] || die "use either --database-url or --install-postgres, not both"
   [ -z "$ADMIN_PASSWORD" ] || [ -n "$ADMIN_EMAIL" ] || die "--admin-password needs --admin-email"
+  case $BASE_URL in
+    https://*) ;;
+    *://*) die "--base-url must be https:// or a local directory" ;;
+  esac
   if [ "$VERSION" = latest ] && [ "$BASE_URL" != "$DEFAULT_BASE_URL" ]; then
     die "--version is required with a custom --base-url"
   fi
@@ -131,24 +136,35 @@ detect_platform() {
     LOG_DIR=""
   else
     INSTALL_DIR=/usr/local/mcpgw
-    CONF_DIR=/usr/local/etc/mcpgw
+    CONF_DIR="/Library/Application Support/mcpgw"
     SVC_USER=_mcpgw
     ROOT_GROUP=wheel
-    LOG_DIR=/usr/local/var/log/mcpgw
+    LOG_DIR=/Library/Logs/mcpgw
   fi
   BIN_DIR="$INSTALL_DIR/bin"
   ENV_FILE="$CONF_DIR/mcpgw.env"
+  LEGACY_MAC_ENV_FILE=/usr/local/etc/mcpgw/mcpgw.env
   LINK=/usr/local/bin/mcpgw
 }
 
 require_root() {
   [ "$(id -u)" = 0 ] && return 0
-  if [ -f "$0" ] && command -v sudo >/dev/null 2>&1; then
-    info "root is required, re-running with sudo"
-    exec sudo -E sh "$0" "$@"
-  fi
-  die "run as root: curl -fsSL <url>/install.sh | sudo sh   (or: sudo sh install.sh ...)"
+  # Only re-exec a real script path: when piped, $0 is "sh" and could match a file in the cwd.
+  case $0 in install.sh|*/install.sh) ;; *) die "run as root: curl -fsSL <url>/install.sh | sudo sh" ;; esac
+  if [ ! -f "$0" ] || ! have sudo; then die "run as root: sudo sh install.sh ..."; fi
+  _self=$(cd "$(dirname "$0")" && pwd)/install.sh
+  set -- sh "$_self" "$@"
+  for _n in VERSION BASE_URL PUBLIC_URL LISTEN_ADDR ENGINE ADMIN_EMAIL INSTALL_POSTGRES NON_INTERACTIVE NO_SERVICE; do
+    eval "[ -z \"\${MCPGW_INSTALL_$_n+x}\" ] || set -- \"MCPGW_INSTALL_$_n=\$MCPGW_INSTALL_$_n\" \"\$@\""
+  done
+  # sudo env would put these in argv (visible in ps), so secrets are never forwarded
+  [ -z "${MCPGW_INSTALL_DATABASE_URL:-}${MCPGW_INSTALL_ADMIN_PASSWORD:-}" ] ||
+    die "MCPGW_INSTALL_DATABASE_URL/ADMIN_PASSWORD are not forwarded through sudo: run the whole command as root (sudo sh install.sh)"
+  info "root is required, re-running with sudo"
+  exec sudo env "$@"
 }
+
+refuse_symlink() { [ ! -L "$1" ] || die "$1 is a symlink: refusing to write through it"; }
 
 have() { command -v "$1" >/dev/null 2>&1; }
 
@@ -181,9 +197,9 @@ random_password() { # 32 alphanumeric chars
 # ---------- download ----------
 fetch() { # fetch URL|PATH DEST
   case $1 in
-    http://*|https://*)
-      if have curl; then curl -fsSL --retry 3 -o "$2" "$1" || die "download failed: $1"
-      elif have wget; then wget -q -O "$2" "$1" || die "download failed: $1"
+    https://*)
+      if have curl; then curl -fsSL --proto '=https' --proto-redir '=https' --retry 3 -o "$2" "$1" || die "download failed: $1"
+      elif have wget; then wget -q --https-only -O "$2" "$1" || die "download failed: $1"
       else die "curl or wget is required"; fi ;;
     *) [ -f "$1" ] || die "file not found: $1"; cp "$1" "$2" ;;
   esac
@@ -191,7 +207,7 @@ fetch() { # fetch URL|PATH DEST
 
 resolve_latest() {
   have curl || die "curl is required to resolve the latest version (or pass --version)"
-  _url=$(curl -fsSLI -o /dev/null -w '%{url_effective}' "$REPO_URL/releases/latest") || die "cannot resolve latest release"
+  _url=$(curl -fsSLI --proto '=https' --proto-redir '=https' -o /dev/null -w '%{url_effective}' "$REPO_URL/releases/latest") || die "cannot resolve latest release"
   VERSION=${_url##*/v}
   [ -n "$VERSION" ] && [ "$VERSION" != "$_url" ] || die "cannot parse latest release from $_url"
   info "latest release: v$VERSION"
@@ -283,6 +299,7 @@ ensure_user() {
 # ---------- postgres ----------
 PG_PSQL=""
 PG_PORT=5432
+PG_FRESH=0
 
 # shellcheck disable=SC1091
 os_release() { ( . /etc/os-release; eval "echo \${$1:-}" ); }
@@ -303,7 +320,7 @@ install_pg_debian() {
   _codename=$(os_release VERSION_CODENAME)
   [ -n "$_codename" ] || die "cannot determine the distribution codename"
   mkdir -p /usr/share/postgresql-common/pgdg
-  curl -fsSL -o /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc https://www.postgresql.org/media/keys/ACCC4CF8.asc
+  curl -fsSL --proto '=https' --proto-redir '=https' -o /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc https://www.postgresql.org/media/keys/ACCC4CF8.asc
   echo "deb [signed-by=/usr/share/postgresql-common/pgdg/apt.postgresql.org.asc] https://apt.postgresql.org/pub/repos/apt $_codename-pgdg main" \
     >/etc/apt/sources.list.d/pgdg.list
   apt-get update -qq
@@ -358,11 +375,33 @@ install_pg_mac() {
   _brew=""
   for _p in /opt/homebrew/bin/brew /usr/local/bin/brew; do [ -x "$_p" ] && _brew=$_p && break; done
   [ -n "$_brew" ] || die "Homebrew not found; install it from https://brew.sh or pass --database-url"
+  _data=$(cd /tmp && sudo -H -u "$SUDO_USER" "$_brew" --prefix)/var/postgresql@$PG_MAJOR
+  PG_FRESH=0; [ -f "$_data/PG_VERSION" ] || PG_FRESH=1 # only a cluster created by this run gets hardened
   info "installing postgresql@$PG_MAJOR with Homebrew (as $SUDO_USER)"
   ( cd /tmp && sudo -H -u "$SUDO_USER" "$_brew" install "postgresql@$PG_MAJOR" ) || die "brew install failed"
   ( cd /tmp && sudo -H -u "$SUDO_USER" "$_brew" services start "postgresql@$PG_MAJOR" ) || die "brew services start failed"
   PG_PSQL=$(cd /tmp && sudo -H -u "$SUDO_USER" "$_brew" --prefix "postgresql@$PG_MAJOR")/bin/psql
   PG_PORT=5432
+}
+
+# brew's initdb leaves trust auth: any local user would be superuser. Superuser access stays on the
+# socket via peer (the brew user); TCP requires scram passwords.
+harden_pg_mac() {
+  info "hardening pg_hba.conf of the new cluster (peer on the socket, scram-sha-256 over TCP)"
+  _hba=$(pg_admin_psql -Atqc 'SHOW hba_file')
+  [ -n "$_hba" ] && [ -f "$_hba" ] || die "cannot locate pg_hba.conf"
+  pg_admin_psql -Atqc "ALTER SYSTEM SET password_encryption = 'scram-sha-256'" >/dev/null
+  ( umask 077
+    cat >"$_hba.new" <<HBA
+local all all peer
+host all all 127.0.0.1/32 scram-sha-256
+host all all ::1/128 scram-sha-256
+HBA
+  )
+  chown "$SUDO_USER" "$_hba.new"
+  mv -f "$_hba.new" "$_hba"
+  pg_admin_psql -Atqc 'SELECT pg_reload_conf()' >/dev/null
+  wait_pg
 }
 
 wait_pg() {
@@ -384,6 +423,7 @@ provision_pg() {
       esac ;;
   esac
   wait_pg
+  if [ "$OS" = darwin ] && [ "$PG_FRESH" = 1 ]; then harden_pg_mac; fi
   _pw=$(random_password)
   info "creating role $DB_ROLE and database $DB_NAME"
   pg_admin_psql -Atq >/dev/null <<SQL
@@ -398,18 +438,6 @@ SQL
   _exists=$(pg_admin_psql -Atqc "SELECT 1 FROM pg_database WHERE datname = '$DB_NAME'")
   [ -n "$_exists" ] || pg_admin_psql -Atqc "CREATE DATABASE $DB_NAME OWNER $DB_ROLE" >/dev/null
   DATABASE_URL="postgres://$DB_ROLE:$_pw@127.0.0.1:$PG_PORT/$DB_NAME?sslmode=disable"
-}
-
-validate_db_url() {
-  if ! have psql; then
-    warn "psql not found: skipping the connection check, 'mcpgw migrate' will report connection problems"
-    return 0
-  fi
-  # shortcut: the URL is briefly visible in ps (psql takes no secret file); fine on a dedicated host
-  _v=$(psql "$DATABASE_URL" -X -Atqc 'show server_version_num' 2>&1) ||
-    die "cannot connect to the database: $_v"
-  case $_v in ''|*[!0-9]*) die "unexpected server_version_num: $_v" ;; esac
-  [ "$_v" -ge 180000 ] || die "Postgres 18+ is required (server_version_num=$_v)"
 }
 
 # ---------- config ----------
@@ -437,13 +465,18 @@ choose_database() {
 }
 
 write_config() {
+  refuse_symlink "$CONF_DIR"
+  if [ "$OS" = darwin ] && [ ! -f "$ENV_FILE" ] && [ -f "$LEGACY_MAC_ENV_FILE" ]; then
+    die "found an older config at $LEGACY_MAC_ENV_FILE (a directory other local users may control); a new install would generate a new MASTER_KEY. Review it, then copy it to $ENV_FILE as root and re-run"
+  fi
   if [ -f "$ENV_FILE" ]; then
     info "keeping existing config $ENV_FILE"
     LISTEN_ADDR=$(env_get MCPGW_LISTEN_ADDR); LISTEN_ADDR=${LISTEN_ADDR:-127.0.0.1:8787}
     return 0
   fi
   choose_database
-  if [ "$INSTALL_POSTGRES" = 1 ]; then provision_pg; else validate_db_url; fi
+  # an external database is validated by "mcpgw migrate" (it reads the env file, no secret in argv)
+  if [ "$INSTALL_POSTGRES" = 1 ]; then provision_pg; fi
   if [ -z "$PUBLIC_URL" ]; then
     _def="http://$LISTEN_ADDR"
     PUBLIC_URL=$_def
@@ -469,6 +502,8 @@ write_config() {
 }
 
 fix_config_perms() {
+  refuse_symlink "$CONF_DIR"
+  refuse_symlink "$ENV_FILE"
   chown "$SVC_USER" "$ENV_FILE"
   chmod 0600 "$ENV_FILE"
   chown "root:$SVC_USER" "$CONF_DIR"
@@ -545,6 +580,7 @@ UNIT
 }
 
 write_plist() {
+  refuse_symlink "$LOG_DIR"
   mkdir -p "$LOG_DIR"
   chown "$SVC_USER" "$LOG_DIR"
   chmod 0750 "$LOG_DIR"
@@ -646,11 +682,11 @@ summary() {
   info "mcpgw v$VERSION installed"
   printf '  URL:        %s\n  config:     %s\n' "${PUBLIC_URL:-http://$LISTEN_ADDR}" "$ENV_FILE"
   if [ "$NO_SERVICE" = 1 ]; then
-    printf '  service:    not installed (--no-service); run: %s serve --env-file %s\n' "$LINK" "$ENV_FILE"
+    printf '  service:    not installed (--no-service); run: %s serve --env-file "%s"\n' "$LINK" "$ENV_FILE"
   elif [ "$OS" = linux ]; then
     printf '  logs:       journalctl -u %s -f\n' "$SVC_NAME"
   else
-    printf '  logs:       tail -f %s/mcpgw.log\n' "$LOG_DIR"
+    printf '  logs:       tail -f "%s/mcpgw.log"\n' "$LOG_DIR"
   fi
   printf '  uninstall:  sudo sh install.sh --uninstall [--purge]\n'
 }

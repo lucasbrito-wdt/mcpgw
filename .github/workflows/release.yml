@@ -277,7 +277,7 @@ jobs:
           echo "--- uninstall --purge"
           sudo ./scripts/install.sh --non-interactive --uninstall --purge
           test ! -e /Library/LaunchDaemons/io.github.lucasbrito-wdt.mcpgw.plist
-          test ! -e /usr/local/etc/mcpgw/mcpgw.env
+          test ! -e "/Library/Application Support/mcpgw/mcpgw.env"
 
       # ---- Windows: winget/EDB PostgreSQL 18, Windows Service ----
       # The runner image ships its own PostgreSQL service on 5432; stop it so the installer's instance is the one in use.
@@ -319,7 +319,7 @@ jobs:
           sudo systemctl status mcpgw --no-pager || true
       - name: Diagnostics (macos)
         if: failure() && runner.os == 'macOS'
-        run: sudo tail -n 100 /usr/local/var/log/mcpgw/mcpgw.log || true
+        run: sudo tail -n 100 /Library/Logs/mcpgw/mcpgw.log || true
       - name: Diagnostics (windows)
         if: failure() && runner.os == 'Windows'
         shell: pwsh

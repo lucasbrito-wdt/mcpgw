@@ -10,9 +10,13 @@ import (
 	"os/signal"
 	"syscall"
 
+	"github.com/jackc/pgx/v5/pgxpool"
+
 	"github.com/lucasbrito-wdt/mcpgw/internal/config"
 	"github.com/lucasbrito-wdt/mcpgw/internal/i18n"
+	"github.com/lucasbrito-wdt/mcpgw/internal/oauth"
 	"github.com/lucasbrito-wdt/mcpgw/internal/store"
+	"github.com/lucasbrito-wdt/mcpgw/internal/vault"
 )
 
 var usage = i18n.T(`usage: mcpgw <command> [flags]
@@ -128,5 +132,17 @@ func runMigrate(ctx context.Context, args []string, stdout io.Writer, l i18n.Loc
 	if len(applied) == 0 {
 		fmt.Fprintln(stdout, i18n.T("database is up to date", "banco de dados atualizado").In(l))
 	}
-	return nil
+	return checkMasterKey(ctx, cfg, pool)
+}
+
+// checkMasterKey fails early when the configured master key cannot open data already in the database.
+func checkMasterKey(ctx context.Context, cfg *config.Config, pool *pgxpool.Pool) error {
+	if cfg.MasterKey == nil {
+		return nil
+	}
+	v, err := vault.New(cfg.MasterKey, vaultKeyID)
+	if err != nil {
+		return err
+	}
+	return wrapMasterKeyMismatch(oauth.CheckSigningKey(ctx, pool, v))
 }
