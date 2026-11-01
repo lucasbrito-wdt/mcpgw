@@ -127,7 +127,24 @@ func checkHTTPS(u *url.URL) error {
 	if u.Hostname() == "" || u.User != nil {
 		return errors.New("URL must have a host and no userinfo")
 	}
+	if isNumericHost(u.Hostname()) {
+		return errBlockedAddress
+	}
 	return nil
+}
+
+// isNumericHost reports shorthand IPv4 forms ("2130706433", "0x7f.1", "127.1") that are not IP
+// literals Go parses: libc resolvers expand them to an address while Go's own resolver sends them
+// to DNS, so the dial guard would see different things per platform. No real TLD is numeric.
+func isNumericHost(host string) bool {
+	if _, err := netip.ParseAddr(host); err == nil {
+		return false
+	}
+	last := strings.ToLower(host[strings.LastIndex(host, ".")+1:])
+	if strings.HasPrefix(last, "0x") {
+		return true
+	}
+	return last != "" && strings.Trim(last, "0123456789") == ""
 }
 
 func parseHTTPSURL(raw string) (*url.URL, error) {

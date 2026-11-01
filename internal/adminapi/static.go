@@ -21,7 +21,7 @@ var (
 )
 
 const (
-	placeholderCSP  = "default-src 'none'"
+	placeholderCSP  = "default-src 'none'; frame-ancestors 'none'"
 	placeholderPage = `<!doctype html><html lang="pt-BR"><head><meta charset="utf-8"><title>MCP Gateway</title></head><body><p>UI não compilada, rode make admin</p></body></html>`
 	immutableCache  = "public, max-age=31536000, immutable"
 	rootAssetCache  = "public, max-age=86400"

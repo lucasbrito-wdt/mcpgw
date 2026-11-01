@@ -42,7 +42,7 @@ func TestPurgeExpiredDropsOldRevokedFamilies(t *testing.T) {
 	ctx := context.Background()
 	now := e.clock.Now()
 	_, err := e.pool.Exec(ctx, `INSERT INTO oauth_revoked_families (family_id, revoked_at) VALUES
-		(uuidv7(), $1), (uuidv7(), $2)`, now.Add(-accessTokenTTL-validationLeeway-1), now.Add(-time.Minute))
+		(uuidv7(), $1), (uuidv7(), $2)`, now.Add(-accessTokenTTL-validationLeeway-time.Second), now.Add(-time.Minute))
 	e.must(err)
 	n, err := e.srv.PurgeExpired(ctx)
 	if err != nil || n != 1 {

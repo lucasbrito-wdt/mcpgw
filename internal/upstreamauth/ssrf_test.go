@@ -51,6 +51,8 @@ func TestProductionFetcherBlocksBadTargets(t *testing.T) {
 		{"cgnat", "https://100.64.0.1/x", errBlockedAddress},
 		{"unspecified", "https://0.0.0.0/x", errBlockedAddress},
 		{"decimal ip", "https://2130706433/x", errBlockedAddress},
+		{"hex ip", "https://0x7f.1/x", errBlockedAddress},
+		{"short ip", "https://127.1/x", errBlockedAddress},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
