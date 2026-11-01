@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"runtime/debug"
 	"sync"
+	"sync/atomic"
 	"unsafe"
 
 	"github.com/tetratelabs/wazero"
@@ -26,11 +27,27 @@ var (
 	// same (immutable, embedded) bytes skips hashing ~1 MB under the global mutex every call.
 	cachedBytesPtr *byte
 	cachedBytesLen int
+
+	// mcpgw patch: one wazero runtime for every qjs Runtime. wazero 1.12 rejects a module
+	// compiled in one runtime and instantiated in another, and compiling per runtime cost
+	// ~7 ms per New. Each instance gets a unique module name; the shared "env" host module
+	// routes jsFunctionProxy to that instance's proxy by the caller's name.
+	sharedRuntime wazero.Runtime
+	proxies       sync.Map // module name -> JsFunctionProxy
+	instanceSeq   atomic.Uint64
 )
+
+func dispatchProxy(ctx context.Context, module api.Module, jsCtx uint32, thisVal uint64, argc, argv uint32) uint64 {
+	proxy, ok := proxies.Load(module.Name())
+	if !ok {
+		panic(fmt.Sprintf("qjs: no proxy registered for module %q", module.Name()))
+	}
+	return proxy.(JsFunctionProxy)(ctx, module, jsCtx, thisVal, argc, argv)
+}
 
 // Runtime wraps a QuickJS WebAssembly runtime with memory management.
 type Runtime struct {
-	wrt      wazero.Runtime
+	name     string
 	module   api.Module
 	malloc   api.Function
 	free     api.Function
@@ -47,7 +64,7 @@ func createGlobalCompiledModule(
 	disableBuildCache bool,
 	cacheDir string,
 	quickjsWasmBytes ...[]byte,
-) (err error) {
+) (compiled wazero.CompiledModule, err error) {
 	// Protect global compilation state with mutex
 	compilationMutex.Lock()
 	defer compilationMutex.Unlock()
@@ -63,7 +80,7 @@ func createGlobalCompiledModule(
 	// shortcut: assumes callers never mutate wasm bytes in place after the first New.
 	if compiledQJSModule != nil && !disableBuildCache &&
 		len(qjsBytes) == cachedBytesLen && unsafe.SliceData(qjsBytes) == cachedBytesPtr {
-		return nil
+		return compiledQJSModule, nil
 	}
 
 	// Calculate hash of the bytes to check if we need to recompile
@@ -71,27 +88,54 @@ func createGlobalCompiledModule(
 
 	// Check if we need to compile or recompile
 	if compiledQJSModule == nil || cachedBytesHash != currentHash || disableBuildCache {
-		var cache wazero.CompilationCache
-		if cacheDir == "" {
-			cache = wazero.NewCompilationCache()
-		} else if cache, err = wazero.NewCompilationCacheWithDir(cacheDir); err != nil {
-			return fmt.Errorf("failed to create compilation cache with dir %s: %w", cacheDir, err)
+		if sharedRuntime == nil {
+			if err = createSharedRuntime(closeOnContextDone, cacheDir); err != nil {
+				return nil, err
+			}
 		}
 
-		cachedRuntimeConfig = wazero.
-			NewRuntimeConfig().
-			WithCompilationCache(cache).
-			WithCloseOnContextDone(closeOnContextDone)
-		wrt := wazero.NewRuntimeWithConfig(ctx, cachedRuntimeConfig)
-
-		if compiledQJSModule, err = wrt.CompileModule(ctx, qjsBytes); err != nil {
-			return fmt.Errorf("failed to compile qjs module: %w", err)
+		if compiledQJSModule, err = sharedRuntime.CompileModule(ctx, qjsBytes); err != nil {
+			return nil, fmt.Errorf("failed to compile qjs module: %w", err)
 		}
 
 		cachedBytesHash = currentHash
 	}
 	cachedBytesPtr, cachedBytesLen = unsafe.SliceData(qjsBytes), len(qjsBytes)
 
+	return compiledQJSModule, nil
+}
+
+// createSharedRuntime builds the process-wide wazero runtime with WASI and the "env" host module.
+// shortcut: CloseOnContextDone and CacheDir come from the first New only; later values are
+// ignored. Fine while every caller passes the same ones (mcpgw does); key the runtime by them if not.
+func createSharedRuntime(closeOnContextDone bool, cacheDir string) (err error) {
+	var cache wazero.CompilationCache
+	if cacheDir == "" {
+		cache = wazero.NewCompilationCache()
+	} else if cache, err = wazero.NewCompilationCacheWithDir(cacheDir); err != nil {
+		return fmt.Errorf("failed to create compilation cache with dir %s: %w", cacheDir, err)
+	}
+
+	cachedRuntimeConfig = wazero.
+		NewRuntimeConfig().
+		WithCompilationCache(cache).
+		WithCloseOnContextDone(closeOnContextDone)
+
+	ctx := context.Background()
+	wrt := wazero.NewRuntimeWithConfig(ctx, cachedRuntimeConfig)
+	if _, err := wsp1.Instantiate(ctx, wrt); err != nil {
+		_ = wrt.Close(ctx)
+		return fmt.Errorf("failed to instantiate WASI: %w", err)
+	}
+	if _, err := wrt.NewHostModuleBuilder("env").
+		NewFunctionBuilder().
+		WithFunc(dispatchProxy).
+		Export("jsFunctionProxy").
+		Instantiate(ctx); err != nil {
+		_ = wrt.Close(ctx)
+		return fmt.Errorf("failed to setup host module: %w", err)
+	}
+	sharedRuntime = wrt
 	return nil
 }
 
@@ -112,58 +156,38 @@ func New(options ...Option) (runtime *Runtime, err error) {
 		return nil, fmt.Errorf("failed to get runtime options: %w", err)
 	}
 
-	if err := createGlobalCompiledModule(
+	proxy, ok := option.ProxyFunction.(JsFunctionProxy)
+	if !ok {
+		return nil, fmt.Errorf("ProxyFunction must be a JsFunctionProxy, got %T", option.ProxyFunction)
+	}
+
+	compiled, err := createGlobalCompiledModule(
 		option.Context,
 		option.CloseOnContextDone,
 		option.DisableBuildCache,
 		option.CacheDir,
 		option.QuickJSWasmBytes,
-	); err != nil {
+	)
+	if err != nil {
 		return nil, fmt.Errorf("failed to create global compiled module: %w", err)
 	}
 
 	runtime = &Runtime{
+		name:     fmt.Sprintf("qjs-%d", instanceSeq.Add(1)),
 		option:   option,
 		context:  &Context{Context: option.Context},
 		registry: proxyRegistry,
 	}
-
-	runtime.wrt = wazero.NewRuntimeWithConfig(
-		option.Context,
-		cachedRuntimeConfig,
-	)
-
-	if _, err := wsp1.Instantiate(option.Context, runtime.wrt); err != nil {
-		return nil, fmt.Errorf("failed to instantiate WASI: %w", err)
-	}
-
-	if _, err := runtime.wrt.NewHostModuleBuilder("env").
-		NewFunctionBuilder().
-		WithFunc(option.ProxyFunction).
-		Export("jsFunctionProxy").
-		Instantiate(option.Context); err != nil {
-		return nil, fmt.Errorf("failed to setup host module: %w", err)
-	}
+	proxies.Store(runtime.name, proxy)
 
 	fsConfig := wazero.
 		NewFSConfig().
 		WithDirMount(runtime.option.CWD, "/")
-	// mcpgw patch: wazero 1.12 rejects a CompiledModule from another Runtime (host import
-	// signatures are matched by identity), so compile again here. The shared compilation cache
-	// in cachedRuntimeConfig turns this into a cache hit.
-	qjsBytes := wasmBytes
-	if len(option.QuickJSWasmBytes) > 0 {
-		qjsBytes = option.QuickJSWasmBytes
-	}
-	compiled, err := runtime.wrt.CompileModule(option.Context, qjsBytes)
-	if err != nil {
-		return nil, fmt.Errorf("failed to compile qjs module: %w", err)
-	}
-
-	if runtime.module, err = runtime.wrt.InstantiateModule(
+	if runtime.module, err = sharedRuntime.InstantiateModule(
 		option.Context,
 		compiled,
 		wazero.NewModuleConfig().
+			WithName(runtime.name).
 			WithStartFunctions(option.StartFunctionName).
 			WithSysWalltime().
 			WithSysNanotime().
@@ -172,6 +196,7 @@ func New(options ...Option) (runtime *Runtime, err error) {
 			WithStdout(option.Stdout).
 			WithStderr(option.Stderr),
 	); err != nil {
+		proxies.Delete(runtime.name)
 		return nil, fmt.Errorf("failed to instantiate module: %w", err)
 	}
 
@@ -206,6 +231,19 @@ func (r *Runtime) String() string {
 	return fmt.Sprintf("QJSRuntime: %p", r)
 }
 
+// Release closes the wasm instance without running guest code and unregisters its proxy: for an
+// instance that trapped or hit its deadline, where Close (which calls free()) can spin. mcpgw patch.
+// Safe after Close and safe to call twice.
+func (r *Runtime) Release() {
+	if r == nil {
+		return
+	}
+	if r.module != nil {
+		_ = r.module.Close(context.Background())
+	}
+	proxies.Delete(r.name)
+}
+
 // Close cleanly shuts down the runtime and frees all associated resources.
 func (r *Runtime) Close() {
 	if r == nil {
@@ -233,6 +271,7 @@ func (r *Runtime) Close() {
 		r.registry.Clear()
 		r.registry = nil
 	}
+	proxies.Delete(r.name)
 
 	// Clear function references
 	r.malloc = nil
