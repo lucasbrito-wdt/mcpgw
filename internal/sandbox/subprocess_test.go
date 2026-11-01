@@ -166,6 +166,10 @@ func TestC1_NativeAsyncResolveFromGoroutineCrashesTheProcess(t *testing.T) {
 		t.Fatalf("expected the README async pattern to crash the process, but it survived:\n%s", tail(out, 500))
 	}
 	var evidence []string
+	// A wedge so deep that even the child's own 20s watchdog never fired is the same corruption.
+	if errors.Is(err, errChildHung) {
+		evidence = append(evidence, "whole process hung, watchdog never ran")
+	}
 	for _, line := range strings.Split(out, "\n") {
 		// The failure mode is nondeterministic (heap corruption): a runtime
 		// fatal error, a Go panic from a use-after-free, or a race report.

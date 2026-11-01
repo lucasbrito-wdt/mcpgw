@@ -8,11 +8,6 @@ updates:
       go-minor-patch:
         patterns: ["*"]
         update-types: [minor, patch]
-    ignore:
-      # wazero 1.12 rejects the qjs module compiled in one runtime and instantiated in another
-      # ("signature mismatch" on env.jsFunctionProxy). Lift once third_party/qjs compiles per runtime.
-      - dependency-name: github.com/tetratelabs/wazero
-        versions: [">= 1.12.0"]
 
   - package-ecosystem: npm
     directory: /web/admin

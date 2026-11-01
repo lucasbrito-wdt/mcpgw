@@ -148,9 +148,21 @@ func New(options ...Option) (runtime *Runtime, err error) {
 	fsConfig := wazero.
 		NewFSConfig().
 		WithDirMount(runtime.option.CWD, "/")
+	// mcpgw patch: wazero 1.12 rejects a CompiledModule from another Runtime (host import
+	// signatures are matched by identity), so compile again here. The shared compilation cache
+	// in cachedRuntimeConfig turns this into a cache hit.
+	qjsBytes := wasmBytes
+	if len(option.QuickJSWasmBytes) > 0 {
+		qjsBytes = option.QuickJSWasmBytes
+	}
+	compiled, err := runtime.wrt.CompileModule(option.Context, qjsBytes)
+	if err != nil {
+		return nil, fmt.Errorf("failed to compile qjs module: %w", err)
+	}
+
 	if runtime.module, err = runtime.wrt.InstantiateModule(
 		option.Context,
-		compiledQJSModule,
+		compiled,
 		wazero.NewModuleConfig().
 			WithStartFunctions(option.StartFunctionName).
 			WithSysWalltime().
