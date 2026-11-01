@@ -1,0 +1,14 @@
+{{define "content"}}
+<h1>{{.S.ErrorHeading}}</h1>
+<p class="lead">{{.S.ErrorLead}}</p>
+<div class="route">
+  <div class="link cut" aria-hidden="true"></div>
+  <div class="node core error">
+    {{template "core" .}}
+    <div>
+      <p class="name">mcpgw</p>
+      <p class="sub" role="alert">{{.Error}}</p>
+    </div>
+  </div>
+</div>
+{{end}}

@@ -1,0 +1,16 @@
+mcpgw
+Copyright 2026 Lucas Brito
+
+This product is licensed under the Apache License, Version 2.0 (see LICENSE).
+
+It includes third-party software under its own license:
+
+third_party/qjs
+  A vendored and patched copy of github.com/fastschema/qjs.
+  MIT License, Copyright (c) 2025 Nguyen Ngoc Phuong and Contributors.
+  See third_party/qjs/LICENSE.
+
+third_party/qjs/qjs.wasm (also copied to internal/sandbox/qjs.wasm)
+  A WebAssembly build of QuickJS-ng, shipped with github.com/fastschema/qjs.
+  MIT License, Copyright (c) 2017-2021 Fabrice Bellard, Charlie Gordon,
+  and the QuickJS-ng contributors.

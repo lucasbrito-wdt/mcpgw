@@ -1,0 +1,40 @@
+{{define "content"}}
+<h1>{{printf .S.ConsentHeadingF .Client.Name}}</h1>
+<p class="lead">{{printf .S.ConsentLeadF .Client.Name}}</p>
+<form class="route" method="post" action="/authorize">
+  <input type="hidden" name="csrf_token" value="{{.CSRF}}">
+  <input type="hidden" name="request" value="{{.Request}}">
+  {{template "agent" .}}
+  <div class="link" aria-hidden="true"></div>
+  <div class="node core">
+    {{template "core" .}}
+    <div>
+      <p class="name">mcpgw</p>
+      <p class="sub">{{.S.SignedInPre}} <strong>{{.Email}}</strong>{{.S.SignedInPost}}</p>
+    </div>
+  </div>
+  {{if .Servers}}
+  <fieldset class="bus">
+    <legend class="sr-only">{{.S.AccessLevels}}</legend>
+    {{range .Servers}}{{$id := .ID}}
+    <fieldset class="server" id="level_{{.ID}}">
+      <legend class="sr-only">{{.Slug}}{{if .Host}}, {{.Host}}{{end}}</legend>
+      <span class="branch" aria-hidden="true"></span>
+      <span class="srv-tile" aria-hidden="true">{{printf "%.1s" .Slug}}</span>
+      <span class="srv-text" aria-hidden="true"><span class="srv-name">{{.Slug}}</span>{{if .Host}}<span class="srv-host mono">{{.Host}}</span>{{end}}</span>
+      <div class="levels">
+        {{range .Options $.Lang}}<label title="{{.Label}}"><input type="radio" name="level_{{$id}}" value="{{.Value}}"{{if .Selected}} checked{{end}}><span>{{.Short}}</span></label>{{end}}
+      </div>
+    </fieldset>
+    {{end}}
+  </fieldset>
+  {{else}}
+  <p class="empty">{{.S.NoServers}}</p>
+  {{end}}
+  <div class="actions">
+    <p class="note">{{.S.Note}}</p>
+    <button class="ghost" type="submit" name="action" value="deny">{{.S.Deny}}</button>
+    <button class="primary" type="submit" name="action" value="consent">{{.S.Authorize}}</button>
+  </div>
+</form>
+{{end}}

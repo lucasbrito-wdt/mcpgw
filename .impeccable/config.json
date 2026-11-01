@@ -1,0 +1,25 @@
+{
+  "detector": {
+    "ignoreRules": [],
+    "ignoreFiles": [],
+    "ignoreValues": [
+      {
+        "rule": "overused-font",
+        "value": "montserrat",
+        "createdAt": "2026-10-29T23:42:03.129Z",
+        "reason": "User: redesign-v2 design system mandated"
+      },
+      {
+        "rule": "overused-font",
+        "value": "geist mono",
+        "createdAt": "2026-10-29T23:42:03.155Z",
+        "reason": "User: redesign-v2 design system mandated"
+      },
+      {
+        "rule": "overused-font",
+        "value": "instrument sans",
+        "createdAt": "2026-11-01T13:32:27.072Z"
+      }
+    ]
+  }
+}

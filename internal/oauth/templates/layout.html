@@ -1,0 +1,174 @@
+{{define "layout"}}<!doctype html>
+<html lang="{{.Lang}}">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="referrer" content="same-origin">
+<link rel="icon" href="/icon.svg" type="image/svg+xml">
+<title>{{.Title}} - MCP Gateway</title>
+<!-- Tokens mirror web/admin/app/globals.css (v5). The page draws the route the request will take:
+     agent -> mcpgw -> one branch per server, the same picture as the switchboard in the portal.
+     The CSP allows only this nonce'd block (no scripts, no style attributes, no fonts, no images),
+     so every state below is pure CSS (:checked, :has). -->
+<style nonce="{{.Nonce}}">
+  :root {
+    color-scheme: dark;
+    --void: #07061A; --ink: #0C0C0E; --panel: #18181B; --tile: #1B1838; --haze: #3B2A7E;
+    --signal: #5F5CFF; --signal-fg: #A5A3FF; --signal-wash: #2B2749; --core: #8B7BFF; --spark: #ECEAFF;
+    --fg: #F8F9FC; --fg-muted: #AEAEC1; --fg-subtle: #707089;
+    --line: #FFFFFF14; --line-strong: #FFFFFF26;
+    --warn: #F5B84B; --cut: #FF5C7A; --cut-wash: #FF5C7A1F;
+    --ease: cubic-bezier(0.22, 1, 0.36, 1);
+    --rail: 40px;
+    --levels-w: calc(4 * 4rem + 3 * 2px + 6px); /* four chips: "Nenhum" sits in the same column on every row */
+    font-family: "Instrument Sans", ui-sans-serif, system-ui, -apple-system, sans-serif;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; min-height: 100dvh; display: grid; place-items: center; padding: 48px 16px;
+    color: var(--fg); background-color: var(--void);
+    -webkit-font-smoothing: antialiased;
+  }
+  main { width: 100%; max-width: 27rem; }
+  main.wide { max-width: 40rem; }
+  .panel { position: relative; border: 1px solid var(--line); border-radius: 20px; padding: 32px;
+    background: color-mix(in oklab, var(--panel) 84%, transparent); backdrop-filter: blur(16px); }
+  .sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; border: 0; }
+  .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; }
+
+  /* heading */
+  h1 { margin: 0; font-size: 24px; line-height: 32px; font-weight: 600; letter-spacing: -0.03em; }
+  .lead { margin: 8px 0 0; max-width: 34rem; font-size: 14px; line-height: 24px; color: var(--fg-muted); }
+
+  /* the route: a rail column with the nodes, and the content beside it */
+  .route { margin: 28px 0 0; container-type: inline-size; }
+  .node { display: grid; grid-template-columns: var(--rail) 1fr; column-gap: 16px; align-items: start; }
+  .node .rail { display: flex; flex-direction: column; align-items: center; align-self: stretch; }
+  /* the rail keeps going below a node's mark, so agent, link, core and bus read as one wire */
+  .node.agent .rail::after, .route:has(.bus) .node.core .rail::after { content: ""; flex: 1; width: 2px; margin-top: 6px; background: var(--line-strong); }
+  .node.agent .rail::after { margin-bottom: -6px; }
+  .node .name { margin: 0; font-size: 14px; line-height: 20px; font-weight: 600; }
+  .node .sub { margin: 2px 0 0; font-size: 13px; line-height: 20px; color: var(--fg-muted); overflow-wrap: anywhere; }
+  .node .sub strong { color: var(--fg); font-weight: 500; }
+  .node .warn { margin: 8px 0 0; display: flex; gap: 8px; font-size: 13px; line-height: 20px; color: var(--warn); }
+  .node .warn svg { flex: none; width: 16px; height: 16px; margin-top: 2px; }
+  .node.error .sub { color: var(--cut); }
+
+  .agent-dot { display: grid; place-items: center; width: 32px; height: 32px; margin-top: -6px; border-radius: 999px; border: 1px solid var(--line-strong);
+    background: var(--tile); font-size: 13px; font-weight: 600; text-transform: uppercase; color: var(--fg); }
+  .core-tile { display: grid; place-items: center; width: var(--rail); height: var(--rail); margin-top: -10px; border-radius: 22%;
+    background: var(--tile); border: 1px solid var(--line-strong); }
+  .core-tile svg { width: 24px; height: 24px; }
+  .core-tile .brackets { stroke: var(--spark); }
+  .core-tile .dot { fill: var(--core); }
+
+  /* agent -> core: the one moving thing on the page, a spark riding the wire toward mcpgw */
+  .link { position: relative; width: 2px; height: 36px; margin: 0 0 16px calc(var(--rail) / 2 - 1px); overflow: hidden;
+    background: linear-gradient(to bottom, var(--line-strong), var(--core)); }
+  .link::after { content: ""; position: absolute; left: 0; top: -12px; width: 2px; height: 12px; border-radius: 2px; background: var(--spark);
+    animation: travel 2.4s var(--ease) infinite; }
+  .link.cut { background: repeating-linear-gradient(to bottom, var(--cut) 0 3px, transparent 3px 7px); }
+  .link.cut::after { display: none; }
+  @keyframes travel { 0% { transform: translateY(0); opacity: 0; } 15% { opacity: 1; } 70%, 100% { transform: translateY(60px); opacity: 0; } }
+
+  /* core -> servers: a bus down the rail, one branch per server */
+  .bus { margin: 0; padding: 8px 0 0; border: 0; min-width: 0; }
+  fieldset.server:first-of-type::before { top: -8px; }
+  fieldset.server { position: relative; margin: 0; padding: 10px 0; border: 0; min-width: 0;
+    display: grid; grid-template-columns: var(--rail) 32px minmax(0, 1fr) var(--levels-w); column-gap: 12px; align-items: center; }
+  fieldset.server::before { content: ""; position: absolute; left: calc(var(--rail) / 2 - 1px); top: 0; bottom: 0; width: 2px; background: var(--line-strong); }
+  fieldset.server:last-of-type::before { bottom: 50%; }
+  .branch { grid-column: 1; justify-self: end; position: relative; width: calc(var(--rail) / 2 + 12px); height: 2px; margin-right: -12px;
+    background: var(--core); transition: background-color .2s var(--ease), opacity .2s var(--ease); }
+  .branch::before { content: ""; position: absolute; left: -3px; top: -2px; width: 6px; height: 6px; border-radius: 999px; background: inherit; }
+  .srv-tile { grid-column: 2; display: grid; place-items: center; width: 32px; height: 32px; border-radius: 10px; border: 1px solid var(--line-strong);
+    background: var(--tile); font-size: 13px; font-weight: 600; text-transform: uppercase; color: var(--fg);
+    transition: opacity .2s var(--ease), border-color .2s var(--ease); }
+  .srv-text { grid-column: 3; min-width: 0; transition: opacity .2s var(--ease); }
+  .srv-name { display: block; font-size: 14px; line-height: 20px; font-weight: 600; }
+  .srv-host { display: block; line-height: 16px; color: var(--fg-muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+  /* level picker: chips sized to their words, the chosen one lit in the color of its wire */
+  .levels { grid-column: 4; display: grid; grid-auto-flow: column; grid-auto-columns: 4rem; justify-self: start; gap: 2px; padding: 2px; border: 1px solid var(--line); border-radius: 8px; background: color-mix(in oklab, var(--ink) 70%, transparent); }
+  .levels label { position: relative; cursor: pointer; }
+  .levels input { position: absolute; inset: 0; margin: 0; opacity: 0; cursor: pointer; }
+  .levels span { display: block; padding: 6px 0; text-align: center; border-radius: 6px; font-size: 12px; line-height: 16px; font-weight: 600; white-space: nowrap; color: var(--fg-muted);
+    transition: background-color .15s var(--ease), color .15s var(--ease); }
+  .levels label:hover span { color: var(--fg); background: rgb(255 255 255 / .06); }
+  .levels input:checked + span { color: var(--signal-fg); background: var(--signal-wash); }
+  .levels input[value="none"]:checked + span { color: var(--fg); background: rgb(255 255 255 / .08); }
+  .levels input[value="destructive"]:checked + span { color: var(--cut); background: var(--cut-wash); }
+  .levels input:focus-visible + span { outline: 2px solid var(--signal-fg); outline-offset: 1px; }
+
+  /* the branch follows the chosen level */
+  fieldset.server:has(input[value="none"]:checked) .branch { background: transparent; }
+  fieldset.server:has(input[value="none"]:checked) .branch::after { content: ""; position: absolute; inset: 0; background: repeating-linear-gradient(to right, var(--fg-subtle) 0 3px, transparent 3px 7px); }
+  fieldset.server:has(input[value="none"]:checked) .branch::before { background: var(--fg-subtle); }
+  fieldset.server:has(input[value="none"]:checked) :is(.srv-tile, .srv-text) { opacity: .45; }
+  fieldset.server:has(input[value="read"]:checked) .branch { background: color-mix(in oklab, var(--core) 55%, transparent); }
+  fieldset.server:has(input[value="destructive"]:checked) .branch { background: var(--cut); }
+  fieldset.server:has(input[value="destructive"]:checked) .srv-tile { border-color: color-mix(in oklab, var(--cut) 60%, transparent); }
+
+  @container (max-width: 31rem) {
+    fieldset.server { grid-template-columns: var(--rail) 32px minmax(0, 1fr); row-gap: 8px; }
+    .levels { grid-column: 2 / -1; justify-self: start; }
+    .branch { align-self: start; margin-top: 15px; }
+  }
+
+  .empty { margin: 0; padding: 10px 0 10px calc(var(--rail) + 16px); position: relative; font-size: 13px; line-height: 20px; color: var(--warn); }
+  .empty::before { content: ""; position: absolute; left: calc(var(--rail) / 2 - 1px); top: 0; height: 50%; width: 2px; background: var(--line-strong); }
+
+  /* forms on the login page sit in the content column, under mcpgw */
+  .field { display: flex; flex-direction: column; gap: 6px; margin-top: 16px; }
+  .field label { font-size: 13px; font-weight: 500; }
+  input[type=email], input[type=password] { height: 40px; padding: 0 12px; border-radius: 6px; border: 1px solid var(--fg-subtle); background: transparent; color: var(--fg); font: inherit; font-size: 14px;
+    transition: border-color .15s var(--ease), box-shadow .15s var(--ease); }
+  input[type=email]:hover, input[type=password]:hover { border-color: var(--fg-muted); }
+  input[type=email]:focus-visible, input[type=password]:focus-visible { outline: none; border-color: var(--signal-fg); box-shadow: 0 0 0 3px color-mix(in oklab, var(--signal) 30%, transparent); }
+  .alert { margin: 16px 0 0; font-size: 13px; line-height: 20px; color: var(--cut); }
+
+  /* actions stay reachable however many servers there are */
+  .actions { position: sticky; bottom: 0; z-index: 1; display: flex; align-items: center; justify-content: flex-end; gap: 8px;
+    margin: 24px -32px -32px; padding: 16px 32px 24px; border-top: 1px solid var(--line); border-radius: 0 0 20px 20px;
+    background: color-mix(in oklab, var(--panel) 92%, transparent); backdrop-filter: blur(16px); }
+  .actions .note { margin: 0 auto 0 0; font-size: 12px; line-height: 16px; color: var(--fg-muted); max-width: 22rem; }
+  .actions.plain { position: static; margin: 24px 0 0; padding: 0; border: 0; background: none; backdrop-filter: none; }
+  button { height: 40px; padding: 0 16px; border-radius: 6px; border: 1px solid transparent; font: inherit; font-size: 14px; font-weight: 600; cursor: pointer; white-space: nowrap;
+    transition: background-color .15s var(--ease), border-color .15s var(--ease), color .15s var(--ease); }
+  button:focus-visible { outline: 2px solid var(--signal-fg); outline-offset: 2px; }
+  button:active { transform: translateY(1px); }
+  button.primary { background: var(--signal); color: #fff; box-shadow: inset 0 1px 0 rgb(255 255 255 / .18); }
+  button.primary:hover { background: color-mix(in oklab, var(--signal) 88%, white); }
+  button.primary:active { background: color-mix(in oklab, var(--signal) 88%, black); }
+  button.ghost { background: transparent; color: var(--fg-muted); }
+  button.ghost:hover { color: var(--fg); background: rgb(255 255 255 / .06); }
+  button.block { width: 100%; }
+
+  @media (max-width: 480px) {
+    body { padding: 16px; place-items: start center; }
+    .panel { padding: 24px 20px; }
+    .actions { margin: 24px -20px -24px; padding: 16px 20px 20px; flex-wrap: wrap; }
+    .actions .note { flex-basis: 100%; }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    * { transition: none !important; }
+    .link::after { display: none; }
+    button:active { transform: none; }
+  }
+</style>
+</head>
+<body><main{{if .Servers}} class="wide"{{end}}><div class="panel">
+{{template "content" .}}
+</div></main></body>
+</html>{{end}}
+
+{{define "agent"}}<div class="node agent">
+  <span class="rail" aria-hidden="true"><span class="agent-dot">{{printf "%.1s" .Client.Name}}</span></span>
+  <div>
+    <p class="name">{{.Client.Name}}</p>
+    <p class="sub">{{if .Client.IDHost}}{{printf .S.IdentityPublishedF .Client.IDHost}}{{else}}{{.S.IdentityUnverifiedPre}} (<span class="mono">{{.Client.ID}}</span>){{.S.IdentityUnverifiedPost}}{{end}}. {{.S.ReturnsTo}} <span class="mono">{{.Client.RedirectHost}}</span>.</p>
+    {{if .Client.Loopback}}<p class="warn" role="note"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" aria-hidden="true"><path d="M8 2.5 14 13H2L8 2.5Z" stroke-linejoin="round"/><path d="M8 6.5v3"/><path d="M8 11.5h0"/></svg><span>{{printf .S.LoopbackWarningF .Client.Name}}</span></p>{{end}}
+  </div>
+</div>{{end}}
+
+{{define "core"}}<span class="rail" aria-hidden="true"><span class="core-tile"><svg viewBox="0 0 64 64" fill="none" stroke-width="6" stroke-linecap="round" stroke-linejoin="round"><g class="brackets"><path d="M24 12H12v40h12"/><path d="M40 12h12v40H40"/></g><circle class="dot" cx="32" cy="32" r="6" stroke="none"/></svg></span></span>{{end}}

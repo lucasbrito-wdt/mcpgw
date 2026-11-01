@@ -1,0 +1,201 @@
+/* Ported from design/v5/src/app/globals.css on 2026-10-31. */
+@import "tailwindcss";
+@import "tw-animate-css";
+@import "shadcn/tailwind.css";
+
+@custom-variant dark (&:is(.dark *));
+
+/* mcpgw v5 tokens. Every color says where it came from: the Airbyte MCP Gateway art
+   (00-hero) or the Airbyte Cloud app, measured with getComputedStyle. */
+@theme {
+  /* surfaces */
+  --color-void: #07061A; /* top of the space in the gateway art */
+  --color-ink: #0C0C0E; /* Airbyte Cloud app background */
+  --color-panel: #18181B; /* Airbyte card and form surface */
+  --color-tile: #1B1838; /* indigo agent pills and SaaS tiles in the art */
+  --color-haze: #3B2A7E; /* violet haze pooled under the art panel */
+  --color-guide: #272239; /* Airbyte setup-guide box */
+
+  /* signal: the gateway */
+  --color-signal: #5F5CFF; /* Airbyte accent: primary button, link, active tab border */
+  --color-signal-fg: #A5A3FF; /* signal lifted for text and icons on dark (6.2:1 on signal-wash) */
+  --color-signal-wash: #2B2749; /* Airbyte active tab background */
+  --color-core: #8B7BFF; /* the luminous gateway tile in the art */
+  --color-spark: #ECEAFF; /* white spark riding the orbit in the art */
+
+  /* text and lines */
+  --color-fg: #F8F9FC; /* Airbyte primary text */
+  --color-fg-muted: #AEAEC1; /* Airbyte secondary text */
+  --color-fg-subtle: #707089; /* Airbyte control border; borders and disabled only, never body text */
+  --color-line: #FFFFFF14; /* hairline between surfaces */
+  --color-line-strong: #FFFFFF26; /* hairline on hover and on raised tiles */
+
+  /* call results: ok, refused/broken, attention */
+  --color-ok: #3DDC97; /* call answered by the upstream */
+  --color-ok-wash: #3DDC971F; /* ok at 12% for pill backgrounds */
+  --color-warn: #F5B84B; /* key expired or scopes changed: fixable by the person */
+  --color-warn-wash: #F5B84B1F; /* warn at 12% for pill backgrounds */
+  --color-cut: #FF5C7A; /* route cut: refused by the gateway or revoked upstream */
+  --color-cut-wash: #FF5C7A1F; /* cut at 12% for pill backgrounds */
+
+  /* geometry: controls 6, cards 10, tiles 14, switchboard panel and core 20 */
+  --radius-control: 6px;
+  --radius-card: 10px;
+  --radius-tile: 14px;
+  --radius-panel: 20px;
+
+  /* the one curve every movement uses (CSS here, EASE_SWITCH in src/lib/motion.ts) */
+  --ease-switch: cubic-bezier(0.22, 1, 0.36, 1);
+
+  /* display: the art headline, tight and heavy; sized to the container that holds it */
+  --text-display: clamp(2.25rem, 1.4rem + 3.2cqi, 3.5rem);
+  --text-display--line-height: 1;
+  --text-display--letter-spacing: -0.045em;
+  --text-display--font-weight: 650;
+  --text-mono-label: 0.6875rem;
+  --text-mono-label--line-height: 1rem;
+  --text-mono-label--letter-spacing: 0.08em;
+
+  /* boot splash: dashed routes flow toward their target; the progress segment sweeps (BootSplash) */
+  --animate-route-flow: route-flow 1.2s linear infinite;
+  --animate-progress-sweep: progress-sweep 1.4s var(--ease-switch) infinite;
+  @keyframes route-flow {
+    to {
+      stroke-dashoffset: -16; /* one dash period (6 + 10) */
+    }
+  }
+  @keyframes progress-sweep {
+    from {
+      transform: translateX(-100%);
+    }
+    to {
+      transform: translateX(334%); /* 100% / 30% segment width, plus the segment itself */
+    }
+  }
+}
+
+@theme inline {
+  --font-sans: var(--font-instrument-sans), ui-sans-serif, system-ui, sans-serif;
+  --font-display: var(--font-instrument-sans), ui-sans-serif, system-ui, sans-serif;
+  --font-brand: var(--font-martian-mono), ui-monospace, monospace;
+  --font-mono: var(--font-geist-mono), ui-monospace, monospace;
+  --font-heading: var(--font-display);
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-sidebar-ring: var(--sidebar-ring);
+  --color-sidebar-border: var(--sidebar-border);
+  --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
+  --color-sidebar-accent: var(--sidebar-accent);
+  --color-sidebar-primary-foreground: var(--sidebar-primary-foreground);
+  --color-sidebar-primary: var(--sidebar-primary);
+  --color-sidebar-foreground: var(--sidebar-foreground);
+  --color-sidebar: var(--sidebar);
+  --color-chart-5: var(--chart-5);
+  --color-chart-4: var(--chart-4);
+  --color-chart-3: var(--chart-3);
+  --color-chart-2: var(--chart-2);
+  --color-chart-1: var(--chart-1);
+  --color-ring: var(--ring);
+  --color-input: var(--input);
+  --color-border: var(--border);
+  --color-destructive: var(--destructive);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-accent: var(--accent);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-muted: var(--muted);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-secondary: var(--secondary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-primary: var(--primary);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-popover: var(--popover);
+  --color-card-foreground: var(--card-foreground);
+  --color-card: var(--card);
+  --radius-sm: calc(var(--radius) * 0.6);
+  --radius-md: calc(var(--radius) * 0.8);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) * 1.4);
+  --radius-2xl: calc(var(--radius) * 1.8);
+  --radius-3xl: calc(var(--radius) * 2.2);
+  --radius-4xl: calc(var(--radius) * 2.6);
+}
+
+/* shadcn semantic tokens, mapped onto the palette above (oklch of the same hex). Dark only. */
+:root,
+.dark {
+  color-scheme: dark;
+  --background: oklch(0.155 0.004 285.9); /* ink */
+  --foreground: oklch(0.982 0.004 271.4); /* fg */
+  --card: oklch(0.21 0.006 285.9); /* panel */
+  --card-foreground: oklch(0.982 0.004 271.4);
+  --popover: oklch(0.21 0.006 285.9);
+  --popover-foreground: oklch(0.982 0.004 271.4);
+  --primary: oklch(0.577 0.234 277); /* signal */
+  --primary-foreground: oklch(1 0 0);
+  --secondary: oklch(0.269 0.042 293.3); /* guide */
+  --secondary-foreground: oklch(0.982 0.004 271.4);
+  --muted: oklch(0.21 0.006 285.9);
+  --muted-foreground: oklch(0.757 0.027 285.7); /* fg-muted */
+  --accent: oklch(0.295 0.061 287.5); /* signal-wash */
+  --accent-foreground: oklch(0.982 0.004 271.4);
+  --destructive: oklch(0.697 0.198 12.9); /* cut */
+  --border: oklch(1 0 0 / 8%); /* line */
+  --input: oklch(0.554 0.039 285.1); /* fg-subtle, Airbyte control border */
+  --ring: oklch(0.754 0.131 283.8); /* signal-fg */
+  --chart-1: oklch(0.661 0.189 285.5); /* core */
+  --chart-2: oklch(0.797 0.164 159.7); /* ok */
+  --chart-3: oklch(0.82 0.141 78.8); /* warn */
+  --chart-4: oklch(0.697 0.198 12.9); /* cut */
+  --chart-5: oklch(0.757 0.027 285.7); /* fg-muted */
+  --radius: 0.625rem;
+  --sidebar: oklch(0.155 0.004 285.9);
+  --sidebar-foreground: oklch(0.982 0.004 271.4);
+  --sidebar-primary: oklch(0.577 0.234 277);
+  --sidebar-primary-foreground: oklch(1 0 0);
+  --sidebar-accent: oklch(0.295 0.061 287.5);
+  --sidebar-accent-foreground: oklch(0.754 0.131 283.8);
+  --sidebar-border: oklch(1 0 0 / 8%);
+  --sidebar-ring: oklch(0.754 0.131 283.8);
+}
+
+@layer base {
+  * {
+    @apply border-border outline-ring/50;
+  }
+  html {
+    @apply bg-ink font-sans text-fg;
+    font-feature-settings: "cv11", "ss01";
+  }
+  body {
+    @apply min-h-dvh bg-transparent text-fg antialiased;
+  }
+  ::selection {
+    @apply bg-signal text-white;
+  }
+}
+
+/* The art's mono caption ("AI AGENTS", "CONTEXT STORE"): uppercase, tracked, quiet. */
+@utility mono-label {
+  font-family: var(--font-mono);
+  font-size: var(--text-mono-label);
+  line-height: var(--text-mono-label--line-height);
+  letter-spacing: var(--text-mono-label--letter-spacing);
+  text-transform: uppercase;
+}
+
+/* Visible keyboard focus shared by every interactive surface. */
+@utility focus-ring {
+  outline: 2px solid transparent;
+  outline-offset: 2px;
+  &:focus-visible {
+    outline-color: var(--color-signal-fg);
+  }
+}
+
+/* Horizontal scroller without a visible bar; arrows and edge fades show the overflow instead. */
+@utility scrollbar-none {
+  scrollbar-width: none;
+  &::-webkit-scrollbar {
+    display: none;
+  }
+}

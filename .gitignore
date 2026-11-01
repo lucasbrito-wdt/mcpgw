@@ -1,0 +1,8 @@
+.env
+/bin/
+*.test
+.DS_Store
+/mcpgw
+/web/admin/node_modules/
+/web/admin/.next/
+/web/admin/tsconfig.tsbuildinfo

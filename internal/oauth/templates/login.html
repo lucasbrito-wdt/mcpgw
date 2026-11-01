@@ -1,0 +1,30 @@
+{{define "content"}}
+<h1>{{.S.LoginHeading}}</h1>
+<p class="lead">{{printf .S.LoginLeadF .Client.Name}}</p>
+<form class="route" method="post" action="/authorize">
+  <input type="hidden" name="csrf_token" value="{{.CSRF}}">
+  <input type="hidden" name="request" value="{{.Request}}">
+  <input type="hidden" name="action" value="login">
+  {{template "agent" .}}
+  <div class="link" aria-hidden="true"></div>
+  <div class="node core">
+    {{template "core" .}}
+    <div>
+      <p class="name">mcpgw</p>
+      <p class="sub">{{printf .S.LoginHintF .Client.Name}}</p>
+      {{if .Error}}<p class="alert" role="alert">{{.Error}}</p>{{end}}
+      <div class="field">
+        <label for="email">{{.S.Email}}</label>
+        <input id="email" name="email" type="email" autocomplete="username" maxlength="320" required autofocus>
+      </div>
+      <div class="field">
+        <label for="password">{{.S.Password}}</label>
+        <input id="password" name="password" type="password" autocomplete="current-password" maxlength="1024" required>
+      </div>
+      <div class="actions plain">
+        <button class="primary block" type="submit">{{.S.SignIn}}</button>
+      </div>
+    </div>
+  </div>
+</form>
+{{end}}

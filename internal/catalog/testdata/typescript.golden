@@ -1,0 +1,33 @@
+declare namespace github {
+  /** Create an issue. Second line. */
+  function create_issue(args: {
+    assignee?: string | null;
+    labels?: string[];
+    meta?: { a: number; "b-c"?: boolean };
+    priority?: "low" | "high" | 3;
+    /** owner/name */
+    repo: string;
+    title: string;
+  }): Promise<{ id: number; url?: string }>;
+  /** Reserved word name */
+  function delete_(args?: Record<string, unknown>): Promise<unknown>;
+  /** List issues */
+  function list_issues(args?: { state?: "open" | "closed" }): Promise<unknown>;
+}
+
+declare namespace misc {
+  function no_schema(args?: Record<string, unknown>): Promise<unknown>;
+  /** Evil *\/ description with /* nesting *\/ and tabs long long long long long long long long long long long long long long long long long long long long long long long long long long long long long long... */
+  function weird(args: {
+    m?: Record<string, number>;
+    t?: [string, number];
+    u?: unknown;
+    /** close *\/ now */
+    x: string;
+  }): Promise<{ a?: string } & { b?: number }>;
+}
+
+declare namespace tree {
+  /** Recursive and ref schemas */
+  function get_node(args: { node: { children?: unknown[]; name: string }; remote?: unknown }): Promise<string | (string | number)[]>;
+}
