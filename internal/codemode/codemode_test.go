@@ -21,6 +21,7 @@ import (
 	"github.com/lucasbrito-wdt/mcpgw/internal/codemode"
 	"github.com/lucasbrito-wdt/mcpgw/internal/policy"
 	"github.com/lucasbrito-wdt/mcpgw/internal/sandbox"
+	"github.com/lucasbrito-wdt/mcpgw/internal/sandbox/montyrs"
 	"github.com/lucasbrito-wdt/mcpgw/internal/store/storetest"
 	"github.com/lucasbrito-wdt/mcpgw/internal/upstream"
 	"github.com/lucasbrito-wdt/mcpgw/internal/upstreamauth"
@@ -31,7 +32,10 @@ const (
 	clientID = "client-1"
 )
 
-var sharedSandbox *sandbox.Executor
+var (
+	sharedSandbox *sandbox.Executor
+	sharedMonty   *montyrs.Executor // nil unless MCPGW_MONTYRS_WORKER is set
+)
 
 func TestMain(m *testing.M) {
 	exec, err := sandbox.NewExecutor()
@@ -40,8 +44,17 @@ func TestMain(m *testing.M) {
 		os.Exit(1)
 	}
 	sharedSandbox = exec
+	if path := os.Getenv(montyrs.WorkerPathEnv); path != "" {
+		if sharedMonty, err = montyrs.NewExecutor(montyrs.WithWorkerPath(path)); err != nil {
+			fmt.Fprintln(os.Stderr, "montyrs:", err)
+			os.Exit(1)
+		}
+	}
 	code := m.Run()
 	_ = exec.Close()
+	if sharedMonty != nil {
+		_ = sharedMonty.Close()
+	}
 	os.Exit(code)
 }
 
@@ -181,11 +194,16 @@ type fixture struct {
 type setup struct {
 	consent    string // consent level, "" for none
 	limits     sandbox.Limits
-	perSubject int // codemode.Options.MaxConcurrentPerSubject
+	perSubject int            // codemode.Options.MaxConcurrentPerSubject
+	python     bool           // run on the montyrs engine; skips the test when no worker is configured
+	runner     sandbox.Runner // overrides the engine when set
 }
 
 func newFixture(t *testing.T, s setup) *fixture {
 	t.Helper()
+	if s.python && sharedMonty == nil {
+		t.Skipf("%s not set", montyrs.WorkerPathEnv)
+	}
 	ctx := context.Background()
 	pool := storetest.New(t)
 	up := newFakeUpstream(t)
@@ -218,8 +236,15 @@ func newFixture(t *testing.T, s setup) *fixture {
 	f.pol = pol
 	f.rec = audit.New(pool, audit.Options{FlushInterval: 20 * time.Millisecond})
 	t.Cleanup(func() { _ = f.rec.Close(context.Background()) })
+	var runner sandbox.Runner = sharedSandbox
+	if s.python {
+		runner = sharedMonty
+	}
+	if s.runner != nil {
+		runner = s.runner
+	}
 	f.svc, err = codemode.New(codemode.Options{
-		Pool: pool, Sandbox: sharedSandbox, Policy: pol, Upstream: upstream.New(), Credentials: f.creds,
+		Pool: pool, Sandbox: runner, Python: s.python, Policy: pol, Upstream: upstream.New(), Credentials: f.creds,
 		Audit: f.rec, PublicURL: "https://gw.example.com/", Limits: s.limits, MaxConcurrentPerSubject: s.perSubject,
 	})
 	must(t, err)
@@ -635,6 +660,63 @@ func TestToolDescriptions(t *testing.T) {
 	_, noneDesc := f.svc.ToolDescriptions(context.Background(), none)
 	if !strings.Contains(noneDesc, "none (no access granted)") {
 		t.Fatalf("description without access = %s", noneDesc)
+	}
+}
+
+func TestToolDescriptionsPython(t *testing.T) {
+	f := newFixture(t, setup{consent: "read", python: true})
+	search, execDesc := f.svc.ToolDescriptions(context.Background(), f.subj)
+	for _, want := range []string{"Available servers: acme.", "call_tool_async", "asyncio.gather", "RuntimeError", "PermissionError"} {
+		if !strings.Contains(execDesc, want) {
+			t.Errorf("execute description lacks %q: %s", want, execDesc)
+		}
+	}
+	if strings.Contains(execDesc, "Promise") {
+		t.Errorf("execute description = %s", execDesc)
+	}
+	if !strings.Contains(search, "TypeScript notation") || !strings.Contains(search, "Python dict") {
+		t.Errorf("search description = %s", search)
+	}
+}
+
+func TestPythonScriptEndToEnd(t *testing.T) {
+	f := newFixture(t, setup{consent: "read", python: true})
+	out, err := f.execute(`import asyncio
+a, b = await asyncio.gather(call_tool_async("acme.get_item", {"id": "1"}), call_tool_async("acme.get_item", {"id": "2"}))
+[a["id"], b["id"], call_tool("acme.get_item", {"id": "3"})["name"]]`)
+	must(t, err)
+	if string(out) != `["1","2","widget"]` {
+		t.Fatalf("out = %s", out)
+	}
+	if ev := f.events(); len(ev) != 3 || ev[0].Decision != "allow" {
+		t.Fatalf("events = %+v", ev)
+	}
+	var calls int
+	var status string
+	must(t, f.pool.QueryRow(context.Background(), `SELECT inner_calls, status FROM executions`).Scan(&calls, &status))
+	if calls != 3 || status != "succeeded" {
+		t.Fatalf("execution = %d %s", calls, status)
+	}
+}
+
+// limitsRecorder is a Runner that records the limits of its last run.
+type limitsRecorder struct{ got sandbox.Limits }
+
+func (r *limitsRecorder) Run(_ context.Context, _ string, _ sandbox.Bridge, lim sandbox.Limits) (json.RawMessage, error) {
+	r.got = lim
+	return json.RawMessage(`1`), nil
+}
+
+func (r *limitsRecorder) Close() error { return nil }
+
+// Pooled engines key workers by Limits.Owner: it must always carry the caller's user ID.
+func TestExecuteSetsOwnerToUserID(t *testing.T) {
+	rec := &limitsRecorder{}
+	f := newFixture(t, setup{consent: "read", runner: rec})
+	_, err := f.execute(`1`)
+	must(t, err)
+	if rec.got.Owner == "" || rec.got.Owner != f.subj.UserID {
+		t.Fatalf("Owner = %q, want %q", rec.got.Owner, f.subj.UserID)
 	}
 }
 

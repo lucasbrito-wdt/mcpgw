@@ -39,9 +39,42 @@ jobs:
         with:
           go-version-file: go.mod
           cache: true
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: internal/sandbox/montyrs/worker
+      - run: make worker
       - run: make lint
       - run: go build ./...
       - run: go test ./...
+        env:
+          MCPGW_MONTYRS_WORKER: ${{ github.workspace }}/bin/montyrs-worker
+
+  # The worker confines itself per OS (seccomp, Seatbelt, AppContainer), so it is tested on all three.
+  montyrs:
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache: true
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: internal/sandbox/montyrs/worker -> target
+      # From the crate dir so .cargo/config.toml (static CRT on Windows) applies.
+      - run: cargo build --release
+        working-directory: internal/sandbox/montyrs/worker
+      - run: go test ./internal/sandbox/montyrs/ -count=1
+        env:
+          MCPGW_MONTYRS_WORKER: ${{ github.workspace }}/internal/sandbox/montyrs/worker/target/release/montyrs-worker${{ runner.os == 'Windows' && '.exe' || '' }}
 
   web:
     runs-on: ubuntu-latest

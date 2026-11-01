@@ -52,6 +52,12 @@ type e2eEnv struct {
 
 func newE2EEnv(t *testing.T) *e2eEnv {
 	t.Helper()
+	return newE2EEnvEngine(t, "")
+}
+
+// newE2EEnvEngine is newE2EEnv on the given sandbox engine ("" is the default).
+func newE2EEnvEngine(t *testing.T, engine string) *e2eEnv {
+	t.Helper()
 	pool := storetest.New(t)
 	up := newFakeUpstream(t)
 	key := make([]byte, 32)
@@ -63,7 +69,7 @@ func newE2EEnv(t *testing.T) *e2eEnv {
 		t.Fatal(err)
 	}
 	base := "http://" + ln.Addr().String()
-	cfg := &config.Config{DatabaseURL: pool.Config().ConnString(), ListenAddr: ln.Addr().String(), PublicURL: base, MasterKey: key}
+	cfg := &config.Config{DatabaseURL: pool.Config().ConnString(), ListenAddr: ln.Addr().String(), PublicURL: base, MasterKey: key, SandboxEngine: engine}
 
 	out := &bytes.Buffer{}
 	e := &e2eEnv{t: t, base: base, upstream: up, adminOut: out}

@@ -159,18 +159,18 @@ func startNodeHTTP(t *testing.T, mode string) int {
 	cmd := exec.Command(node, entry, mode)
 	cmd.Env = []string{"PATH=" + os.Getenv("PATH"), "HOME=" + os.Getenv("HOME"), fmt.Sprintf("PORT=%d", port)}
 	cmd.Stdout, cmd.Stderr = logs, logs
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	setProcessGroup(cmd)
 	if err := cmd.Start(); err != nil {
 		t.Fatalf("start server-everything %s: %v", mode, err)
 	}
 	exited := make(chan struct{})
 	go func() { _ = cmd.Wait(); close(exited) }()
 	t.Cleanup(func() {
-		_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGTERM)
+		signalProcessGroup(cmd, syscall.SIGTERM)
 		select {
 		case <-exited:
 		case <-time.After(5 * time.Second):
-			_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+			signalProcessGroup(cmd, syscall.SIGKILL)
 			<-exited
 		}
 		if t.Failed() {

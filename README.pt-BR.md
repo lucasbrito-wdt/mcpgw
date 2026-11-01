@@ -74,6 +74,170 @@ Em vez de carregar o schema de cada tool no contexto do agente, o mcpgw expõe d
 
 O mcpgw faz proxy de tools. Resources e prompts dos upstreams não são expostos.
 
+## Instalação
+
+Os instaladores abaixo configuram uma release já compilada como serviço do sistema. Para compilar a
+partir do código-fonte, siga o [Quickstart](#quickstart).
+
+As releases são publicadas no [GitHub Releases](https://github.com/lucasbrito-wdt/mcpgw/releases). Cada
+instalador baixa o arquivo da sua plataforma, confere o hash SHA-256 contra o `SHA256SUMS` e para se o
+hash não bater.
+
+### Pré-requisitos
+
+- PostgreSQL 18 ou mais recente. O instalador pergunta se você quer usar um banco que já possui ou
+  instalar o PostgreSQL 18 nesta máquina.
+- Linux com systemd, macOS ou Windows de 64 bits. No Linux sem systemd, adicione `--no-service`.
+- Privilégios de administrador: `sudo` no Linux e no macOS, um PowerShell elevado no Windows.
+
+### Linux e macOS
+
+```bash
+curl -fsSL https://github.com/lucasbrito-wdt/mcpgw/releases/latest/download/install.sh | sudo sh
+```
+
+As opções vão depois de `sh -s --`:
+
+```bash
+curl -fsSL https://github.com/lucasbrito-wdt/mcpgw/releases/latest/download/install.sh \
+  | sudo sh -s -- --database-url 'postgres://mcpgw:secret@db.internal:5432/mcpgw' \
+      --admin-email admin@example.com
+```
+
+Sem terminal interativo, defina as variáveis no `env`, porque o `sudo` limpa o ambiente:
+
+```bash
+curl -fsSL https://github.com/lucasbrito-wdt/mcpgw/releases/latest/download/install.sh \
+  | sudo env MCPGW_INSTALL_NON_INTERACTIVE=1 MCPGW_INSTALL_INSTALL_POSTGRES=1 sh
+```
+
+| Opção | Variável de ambiente | Descrição |
+| --- | --- | --- |
+| `--version V` | `MCPGW_INSTALL_VERSION` | Release a instalar, com ou sem o `v`. Padrão: `latest`. Obrigatória com um `--base-url` personalizado. |
+| `--base-url URL\|DIR` | `MCPGW_INSTALL_BASE_URL` | Raiz de download ou diretório local. Os arquivos são lidos de `<base>/v<version>/<arquivo>`. |
+| `--database-url URL` | `MCPGW_INSTALL_DATABASE_URL` | Banco PostgreSQL 18+ já existente. Exclusiva com `--install-postgres`. |
+| `--install-postgres` | `MCPGW_INSTALL_INSTALL_POSTGRES=1` | Instala o PostgreSQL 18 nesta máquina e cria o role e o banco `mcpgw`. |
+| `--public-url URL` | `MCPGW_INSTALL_PUBLIC_URL` | URL externa do gateway. Padrão: `http://<listen-addr>`. |
+| `--listen-addr ADDR` | `MCPGW_INSTALL_LISTEN_ADDR` | Endereço em que o gateway escuta. Padrão: `127.0.0.1:8787`. |
+| `--engine qjs\|monty` | `MCPGW_INSTALL_ENGINE` | Engine do sandbox. Padrão: `qjs`. |
+| `--admin-email E` | `MCPGW_INSTALL_ADMIN_EMAIL` | Cria o primeiro usuário admin. |
+| `--admin-password P` | `MCPGW_INSTALL_ADMIN_PASSWORD` | Senha desse admin. Prefira a variável ou o prompt: os argumentos ficam visíveis no `ps`. |
+| `--non-interactive` | `MCPGW_INSTALL_NON_INTERACTIVE=1` | Nunca pergunta nada. Falha se faltar algum valor obrigatório. |
+| `--no-service` | `MCPGW_INSTALL_NO_SERVICE=1` | Instala apenas os binários e a configuração. Você sobe o gateway manualmente. |
+| `--uninstall` | nenhuma | Para e remove o serviço e os binários. |
+| `--purge` | nenhuma | Com `--uninstall`: remove também a configuração, os logs e o usuário do serviço. |
+| `-h`, `--help` | nenhuma | Mostra o uso. |
+
+Sem `--database-url` nem `--install-postgres`, uma execução interativa pergunta qual usar. Uma execução
+não interativa falha.
+
+O `--install-postgres` usa o repositório apt do PGDG no Debian e no Ubuntu, o repositório dnf do PGDG no
+RHEL e no Fedora, e o Homebrew (`postgresql@18`) no macOS. Em outras distribuições, use
+`--database-url`. No macOS, rode o instalador com `sudo` a partir do seu usuário normal, não de um shell
+root, porque o Homebrew se recusa a rodar como root.
+
+### Windows
+
+Abra o PowerShell como Administrador e rode:
+
+```powershell
+irm https://github.com/lucasbrito-wdt/mcpgw/releases/latest/download/install.ps1 | iex
+```
+
+Quando o script é executado via pipe, ele não recebe parâmetros. Defina antes as variáveis `MCPGW_INSTALL_*`:
+
+```powershell
+$env:MCPGW_INSTALL_DATABASE_URL = 'postgres://mcpgw:secret@db.internal:5432/mcpgw'
+irm https://github.com/lucasbrito-wdt/mcpgw/releases/latest/download/install.ps1 | iex
+```
+
+Para passar parâmetros, baixe o script e rode a partir de um shell elevado:
+
+```powershell
+Invoke-WebRequest https://github.com/lucasbrito-wdt/mcpgw/releases/latest/download/install.ps1 -OutFile install.ps1
+powershell -ExecutionPolicy Bypass -File .\install.ps1 -InstallPostgres `
+  -AdminEmail admin@example.com -AdminPassword (Read-Host 'Admin password' -AsSecureString)
+```
+
+| Parâmetro | Variável de ambiente | Descrição |
+| --- | --- | --- |
+| `-Version` | `MCPGW_INSTALL_VERSION` | Release a instalar. Padrão: a mais recente. |
+| `-BaseUrl` | `MCPGW_INSTALL_BASE_URL` | Raiz de download ou diretório local. |
+| `-DatabaseUrl` | `MCPGW_INSTALL_DATABASE_URL` | Banco PostgreSQL 18+ já existente. |
+| `-InstallPostgres` | `MCPGW_INSTALL_INSTALL_POSTGRES=1` | Instala o PostgreSQL 18 com o winget (o instalador da EDB é o fallback). |
+| `-PublicUrl` | `MCPGW_INSTALL_PUBLIC_URL` | URL externa do gateway. |
+| `-ListenAddr` | `MCPGW_INSTALL_LISTEN_ADDR` | Padrão: `127.0.0.1:8787`. |
+| `-Engine` | `MCPGW_INSTALL_ENGINE` | `qjs` (padrão) ou `monty`. |
+| `-AdminEmail` | `MCPGW_INSTALL_ADMIN_EMAIL` | Cria o primeiro usuário admin. Precisa de senha. |
+| `-AdminPassword` | `MCPGW_INSTALL_ADMIN_PASSWORD` | Um `SecureString` na linha de comando. A variável guarda texto puro. |
+| `-NonInteractive` | `MCPGW_INSTALL_NON_INTERACTIVE=1` | Nunca pergunta nada. |
+| `-NoService` | `MCPGW_INSTALL_NO_SERVICE=1` | Instala apenas os arquivos e a configuração. |
+| `-Uninstall` | `MCPGW_INSTALL_UNINSTALL=1` | Remove o serviço, os binários e a entrada no PATH. |
+| `-Purge` | `MCPGW_INSTALL_PURGE=1` | Com `-Uninstall`: remove também o `%ProgramData%\mcpgw`. |
+
+O script roda no Windows PowerShell 5.1 e no PowerShell 7. As releases para Windows são somente amd64.
+
+### Onde ficam os arquivos
+
+| | Linux | macOS | Windows |
+| --- | --- | --- | --- |
+| Binários | `/opt/mcpgw/bin/` (`mcpgw`, `montyrs-worker`), com link em `/usr/local/bin/mcpgw` | `/usr/local/mcpgw/bin/`, com link em `/usr/local/bin/mcpgw` | `C:\Program Files\mcpgw\`, adicionado ao `PATH` da máquina |
+| Configuração | `/etc/mcpgw/mcpgw.env` | `/Library/Application Support/mcpgw/mcpgw.env` | `%ProgramData%\mcpgw\mcpgw.env` |
+| Serviço | unit do systemd `mcpgw` | daemon do launchd `io.github.lucasbrito-wdt.mcpgw` | serviço do Windows `mcpgw` |
+| Usuário do serviço | `mcpgw` | `_mcpgw` | `NT SERVICE\mcpgw` |
+| Logs | `journalctl -u mcpgw -f` | `/Library/Logs/mcpgw/mcpgw.log` | `%ProgramData%\mcpgw\logs\mcpgw.log` |
+
+O instalador do Windows guarda a senha de superusuário do PostgreSQL que ele gerou em
+`%ProgramData%\mcpgw\pg-superuser.txt`, legível apenas por Administradores e SYSTEM.
+
+### Atualização
+
+Rode o mesmo comando de novo. O instalador substitui os binários, roda as migrations e reinicia o
+serviço. A configuração existente é mantida.
+
+Como a configuração é mantida, `--database-url`, `--listen-addr`, `--public-url` e `--engine` só valem
+na primeira instalação. Para mudá-los depois, edite o arquivo de ambiente e reinicie o serviço:
+
+```bash
+sudo systemctl restart mcpgw                                      # Linux
+sudo launchctl kickstart -k system/io.github.lucasbrito-wdt.mcpgw  # macOS
+Restart-Service mcpgw                                             # Windows, elevado
+```
+
+### Desinstalação
+
+```bash
+curl -fsSL https://github.com/lucasbrito-wdt/mcpgw/releases/latest/download/install.sh | sudo sh -s -- --uninstall
+curl -fsSL https://github.com/lucasbrito-wdt/mcpgw/releases/latest/download/install.sh | sudo sh -s -- --uninstall --purge
+```
+
+No Windows, rode `.\install.ps1 -Uninstall`, acrescentando `-Purge` para remover a configuração.
+
+A desinstalação mantém a configuração e os logs, e nunca mexe no banco de dados. O `--purge` remove
+também o usuário do serviço. Para apagar o banco, rode o comando abaixo como superusuário do PostgreSQL.
+A ação é irreversível:
+
+```sql
+DROP DATABASE mcpgw;
+DROP ROLE mcpgw;
+```
+
+> **Faça backup da configuração.** O arquivo de ambiente guarda o `MCPGW_MASTER_KEY`, que o instalador
+> gera na primeira instalação. Todos os segredos gravados no banco são cifrados com essa chave. Copie o
+> arquivo de ambiente para um lugar seguro. Se você perder a chave ou remover a configuração com
+> `--purge`, os dados existentes no banco não poderão mais ser decifrados. Uma nova instalação precisará
+> então de um banco vazio.
+
+### Releases
+
+Cada tag `v*` publica uma GitHub Release com um arquivo por plataforma, chamado
+`mcpgw_<version>_<os>_<arch>.tar.gz` (`.zip` no Windows), e um arquivo `SHA256SUMS`. Os dois instaladores
+são anexados à release. Releases com hífen na versão são marcadas como prerelease.
+
+Os dois instaladores conferem o SHA-256 do arquivo contra o `SHA256SUMS` antes de extraí-lo. O
+`--base-url` (`-BaseUrl`) aceita um espelho ou um diretório local com o mesmo layout,
+`<base>/v<version>/<arquivo>`.
+
 ## Quickstart
 
 ### Requisitos
@@ -213,6 +377,23 @@ O que o gateway serve na sua única porta:
 | `/_next/` e alguns arquivos de marca na raiz, como `/favicon.ico` | Assets estáticos da interface web. |
 | `/portal/`, `/portal/api/` | Portal do usuário e a API dele. |
 | `/healthz` | Health check. |
+
+## Engines de sandbox
+
+O code mode executa scripts em um sandbox. Existem dois engines:
+
+- `MCPGW_SANDBOX_ENGINE`: `qjs` (padrão, QuickJS em WebAssembly) ou `monty` (Python em um worker Rust nativo).
+- `MCPGW_MONTYRS_WORKER`: caminho do worker usado pelo `monty`. Padrão: `montyrs-worker` ao lado do executável `mcpgw`, resolvido para caminho absoluto.
+- `make worker` compila o worker em `bin/montyrs-worker` (`.exe` no Windows). O `make build` também o executa.
+- No Windows o worker roda dentro de um AppContainer, que precisa de leitura e execução no exe: o `make worker` concede; para um worker copiado para outro lugar rode `icacls montyrs-worker.exe /grant "*S-1-15-2-1:(RX)"`.
+
+Segurança por plataforma: o worker se confina no nível do sistema operacional.
+
+- Linux (mais forte): allowlist de syscalls (seccomp), `no_new_privs` e rlimits.
+- Windows: AppContainer, Job Object e mitigation policies do processo.
+- macOS: o Seatbelt nega rede e acesso a arquivos, mas não filtra syscalls nem impede memória executável (W^X é apenas o padrão do SO). Um escape completo exige quebrar o interpretador Monty e depois o Seatbelt.
+
+Prefira Linux em produção multi-tenant.
 
 ## Web admin e portal
 

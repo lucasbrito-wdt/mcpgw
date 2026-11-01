@@ -7,6 +7,8 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -110,5 +112,44 @@ func TestWarnLoggerDropsInfo(t *testing.T) {
 	out := sb.String()
 	if strings.Contains(out, "noisy") || !strings.Contains(out, "kept") {
 		t.Fatalf("log output = %q", out)
+	}
+}
+
+func TestNewSandboxMontyChecksWorker(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("MCPGW_MONTYRS_WORKER", filepath.Join(dir, "missing"))
+	if _, err := newSandbox(config.EngineMonty); err == nil || !strings.Contains(err.Error(), "missing") {
+		t.Fatalf("missing worker: err = %v", err)
+	}
+	plain := filepath.Join(dir, "plain")
+	if err := os.WriteFile(plain, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("MCPGW_MONTYRS_WORKER", plain)
+	if _, err := newSandbox(config.EngineMonty); err == nil || !strings.Contains(err.Error(), "not an executable") {
+		t.Fatalf("non-executable worker: err = %v", err)
+	}
+}
+
+func TestNewSandboxDefaultsToQJS(t *testing.T) {
+	r, err := newSandbox(config.EngineQJS)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = r.Close()
+}
+
+func TestNewSandboxMontyResolvesRelativeWorker(t *testing.T) {
+	dir := t.TempDir()
+	t.Chdir(dir)
+	if err := os.WriteFile("plain", []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	for _, rel := range []string{"plain", "./plain", "absent"} {
+		t.Setenv("MCPGW_MONTYRS_WORKER", rel)
+		_, err := newSandbox(config.EngineMonty)
+		if err == nil || !strings.Contains(err.Error(), filepath.Join(dir, strings.TrimPrefix(rel, "./"))) {
+			t.Fatalf("%s: err = %v, want it to name the absolute path", rel, err)
+		}
 	}
 }

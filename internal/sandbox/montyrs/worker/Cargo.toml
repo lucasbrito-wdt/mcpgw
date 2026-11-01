@@ -1,0 +1,53 @@
+[package]
+name = "montyrs-worker"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["arbitrary_precision", "preserve_order"] }
+libc = "0.2"
+monty = "1.4.0"
+monty-alloc = { version = "1.4.0", features = ["exit-code"] }
+monty-types = "1.4.0"
+num-bigint = "0.4"
+
+[features]
+# Builds confine-selftest, the probe the Go tests use to prove confinement.
+# Never enabled for the shipped worker, which has no test mode.
+confine-selftest = []
+
+[[bin]]
+name = "montyrs-worker"
+path = "src/main.rs"
+
+[[bin]]
+name = "confine-selftest"
+path = "src/bin/confine_selftest.rs"
+required-features = ["confine-selftest"]
+
+[profile.release]
+panic = "abort"
+lto = true
+codegen-units = 1
+
+[target.'cfg(target_os = "linux")'.dependencies]
+seccompiler = "0.5"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_System_Console",
+    "Win32_System_Diagnostics_Debug",
+    "Win32_System_Environment",
+    "Win32_System_IO",
+    "Win32_System_JobObjects",
+    "Win32_System_LibraryLoader",
+    "Win32_System_Memory",
+    "Win32_System_SystemInformation",
+    "Win32_System_SystemServices",
+    "Win32_System_Threading",
+    "Win32_System_WindowsProgramming",
+] }

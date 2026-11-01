@@ -63,6 +63,23 @@ func newKeyRing(pool *pgxpool.Pool, sealer Sealer, now func() time.Time) *keyRin
 
 func signingKeyAAD(kid string) []byte { return []byte("mcpgw/signing-key/" + kid) }
 
+// CheckSigningKey reports whether sealer can open the stored active signing key. A database
+// without one passes (fresh install); nothing is created.
+func CheckSigningKey(ctx context.Context, pool *pgxpool.Pool, sealer Sealer) error {
+	var kid string
+	var sealed []byte
+	err := pool.QueryRow(ctx, `SELECT kid, private_key_ciphertext FROM signing_keys
+		WHERE alg = $1 AND retired_at IS NULL ORDER BY created_at DESC LIMIT 1`, signingAlg).Scan(&kid, &sealed)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	_, err = newKeyRing(pool, sealer, time.Now).openPrivateKey(kid, sealed)
+	return err
+}
+
 // ensureActive loads the newest non-retired key, creating one when none exists.
 func (k *keyRing) ensureActive(ctx context.Context) error {
 	var kid string

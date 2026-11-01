@@ -47,6 +47,12 @@ var preludeSource string
 //go:embed qjs.wasm
 var qjsWasm []byte // byte-identical copy of the module embedded in fastschema/qjs v0.0.6
 
+// Runner is the engine-neutral surface of an executor: *Executor (QuickJS) and montyrs.Executor (Python).
+type Runner interface {
+	Run(ctx context.Context, code string, bridge Bridge, lim Limits) (json.RawMessage, error)
+	Close() error
+}
+
 // Bridge is the only way out of the sandbox. Each call runs on its own
 // goroutine, so several calls made by one script (Promise.all) can execute
 // concurrently, up to Limits.MaxInFlight. The context is cancelled when the
@@ -69,6 +75,10 @@ type Limits struct {
 	MaxInFlight int
 	// MaxResultBytes caps the JSON-encoded return value.
 	MaxResultBytes int
+	// Owner keys worker reuse in engines with long-lived worker processes
+	// (montyrs): workers are never shared across different owners. Empty means
+	// anonymous, which is one owner of its own. The QuickJS engines ignore it.
+	Owner string
 }
 
 // DefaultLimits returns the production defaults.

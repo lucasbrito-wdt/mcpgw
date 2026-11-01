@@ -11,11 +11,16 @@ import (
 )
 
 const (
-	EnvDatabaseURL = "MCPGW_DATABASE_URL"
-	EnvListenAddr  = "MCPGW_LISTEN_ADDR"
-	EnvPublicURL   = "MCPGW_PUBLIC_URL"
-	EnvMasterKey   = "MCPGW_MASTER_KEY"
-	EnvPprofAddr   = "MCPGW_PPROF_ADDR"
+	EnvDatabaseURL   = "MCPGW_DATABASE_URL"
+	EnvListenAddr    = "MCPGW_LISTEN_ADDR"
+	EnvPublicURL     = "MCPGW_PUBLIC_URL"
+	EnvMasterKey     = "MCPGW_MASTER_KEY"
+	EnvPprofAddr     = "MCPGW_PPROF_ADDR"
+	EnvSandboxEngine = "MCPGW_SANDBOX_ENGINE"
+
+	// EngineQJS is the QuickJS (JavaScript) sandbox, the default; EngineMonty runs Python in the montyrs worker.
+	EngineQJS   = "qjs"
+	EngineMonty = "monty"
 
 	DefaultListenAddr = "127.0.0.1:8787"
 	DefaultPublicURL  = "http://localhost:8787"
@@ -33,6 +38,8 @@ type Config struct {
 	MasterKey []byte
 	// PprofAddr, when set, serves net/http/pprof on this loopback address (profiling only).
 	PprofAddr string
+	// SandboxEngine is EngineQJS or EngineMonty.
+	SandboxEngine string
 }
 
 // Load reads configuration through getenv (os.Getenv in production) and validates it.
@@ -43,8 +50,13 @@ func Load(getenv func(string) string) (*Config, error) {
 		ListenAddr:  valueOr(getenv(EnvListenAddr), DefaultListenAddr),
 		PublicURL:   valueOr(getenv(EnvPublicURL), DefaultPublicURL),
 		PprofAddr:   strings.TrimSpace(getenv(EnvPprofAddr)),
+
+		SandboxEngine: strings.ToLower(valueOr(getenv(EnvSandboxEngine), EngineQJS)),
 	}
 	var errs []error
+	if cfg.SandboxEngine != EngineQJS && cfg.SandboxEngine != EngineMonty {
+		errs = append(errs, fmt.Errorf("%s: must be %q or %q, got %q", EnvSandboxEngine, EngineQJS, EngineMonty, cfg.SandboxEngine))
+	}
 	if cfg.DatabaseURL == "" {
 		errs = append(errs, fmt.Errorf("%s is required", EnvDatabaseURL))
 	}

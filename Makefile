@@ -1,11 +1,23 @@
-.PHONY: admin build test-admin-web test lint fmt
+# Windows hosts produce montyrs-worker.exe.
+EXE = $(if $(filter Windows_NT,$(OS)),.exe)
+
+.PHONY: admin worker build test-admin-web test lint fmt
 
 # Builds the static export embedded by web/admin/embed.go. next build wipes out/, so .keep is restored.
 admin:
 	cd web/admin && pnpm install --frozen-lockfile && pnpm build
 	touch web/admin/out/.keep
 
-build: admin
+# The montyrs worker is a separate Rust binary; MCPGW_SANDBOX_ENGINE=monty finds it next to mcpgw.
+worker:
+	# Run from the crate dir: cargo reads .cargo/config.toml (static CRT on Windows) from the cwd, not the manifest path.
+	cd internal/sandbox/montyrs/worker && cargo build --release
+	mkdir -p bin
+	cp internal/sandbox/montyrs/worker/target/release/montyrs-worker$(EXE) bin/montyrs-worker$(EXE)
+	# The worker runs inside an AppContainer on Windows, which needs read+execute on the exe.
+	$(if $(EXE),icacls bin/montyrs-worker.exe /grant "*S-1-15-2-1:(RX)")
+
+build: admin worker
 	go build -o bin/mcpgw ./cmd/mcpgw
 
 test-admin-web:
