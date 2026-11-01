@@ -2,12 +2,14 @@ package montyrs
 
 import (
 	"errors"
+	"net"
 	"os"
 	"os/exec"
 	"runtime"
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/lucasbrito-wdt/mcpgw/internal/sandbox"
 )
@@ -61,16 +63,66 @@ func TestConfinementBlocksEscapes(t *testing.T) {
 				if runtime.GOOS == "windows" && attempt == "socket" {
 					t.Skip("an AppContainer mediates connect, not socket creation")
 				}
-				out, err := workerCommand(bin, attempt, mode).Output()
+				args := []string{attempt, mode}
+				var ln net.Listener
+				if attempt == "connect" {
+					ln = listenLoopback(t)
+					args = append(args, ln.Addr().String())
+				}
+				out, err := workerCommand(bin, args...).Output()
 				assertBlocked(t, string(out), err, mode)
+				if ln != nil {
+					assertNothingAccepted(t, ln)
+				}
 			})
 		}
+		t.Run(mode+"/connect-external", func(t *testing.T) {
+			out, err := workerCommand(bin, "connect", mode, reachableExternalAddr(t)).Output()
+			assertBlocked(t, string(out), err, mode)
+		})
+	}
+}
+
+// externalAddr is a public HTTPS endpoint (Cloudflare DNS) to dial out to.
+const externalAddr = "1.1.1.1:443"
+
+// reachableExternalAddr returns externalAddr once the test itself can reach
+// it, so a failed dial from the probe can only be the sandbox.
+func reachableExternalAddr(t *testing.T) string {
+	t.Helper()
+	conn, err := net.DialTimeout("tcp4", externalAddr, 3*time.Second)
+	if err != nil {
+		t.Skipf("%s unreachable from the test itself: %v", externalAddr, err)
+	}
+	_ = conn.Close()
+	return externalAddr
+}
+
+func listenLoopback(t *testing.T) net.Listener {
+	t.Helper()
+	ln, err := net.Listen("tcp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = ln.Close() })
+	return ln
+}
+
+// assertNothingAccepted fails if the probe, which has exited, reached the
+// listener: a completed handshake waits in the backlog.
+func assertNothingAccepted(t *testing.T, ln net.Listener) {
+	t.Helper()
+	_ = ln.(*net.TCPListener).SetDeadline(time.Now().Add(200 * time.Millisecond))
+	if conn, err := ln.Accept(); err == nil {
+		_ = conn.Close()
+		t.Fatal("the confined probe connected to the loopback listener")
 	}
 }
 
 // incidentalWindowsErrors fail an attempt with no sandbox at all: file not
-// found, path not found, connection refused (nothing listens on port 1).
-var incidentalWindowsErrors = []string{"(os error 2)", "(os error 3)", "(os error 10061)"}
+// found, path not found. A refused connect is not among them: the probe dials
+// a live listener (checked to accept nothing) or a host the test reached.
+var incidentalWindowsErrors = []string{"(os error 2)", "(os error 3)"}
 
 // assertBlocked accepts a seccomp kill (SIGSYS) or a reported denial. The
 // sandbox alone must answer EPERM, not some incidental error.

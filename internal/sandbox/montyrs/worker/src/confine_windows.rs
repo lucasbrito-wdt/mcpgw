@@ -17,6 +17,13 @@
 //! - mitigations: no child processes, no dynamic code (ACG), no win32k
 //!   syscalls, only Microsoft-signed, local, non-low-label DLLs;
 //! - the launcher's stdin, stdout and stderr, and no other handle.
+//!
+//! Network isolation has a single layer: the AppContainer filters of the
+//! Windows Filtering Platform, kept by the firewall service (BFE, mpssvc). No
+//! process mitigation blocks Winsock (ws2_32.dll is Microsoft-signed) and a
+//! job can only rate-limit traffic, so on a host whose firewall service is
+//! stopped the child could reach the network. confine-selftest's connect
+//! attempts check it on every test host.
 
 use std::ffi::{CStr, OsStr, OsString, c_void};
 use std::marker::PhantomData;
