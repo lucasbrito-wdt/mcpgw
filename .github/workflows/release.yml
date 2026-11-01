@@ -248,7 +248,9 @@ jobs:
           test ! -e /etc/mcpgw/mcpgw.env
 
           echo "--- fresh install with the monty engine"
-          install --database-url "$db_url" --engine monty
+          # Purge removed the master key, so the old database can no longer be decrypted: use an empty one.
+          docker exec pg psql -U postgres -c 'CREATE DATABASE mcpgw_smoke_monty'
+          install --database-url "${db_url/mcpgw_smoke/mcpgw_smoke_monty}" --engine monty
           wait_healthy
           sudo grep -Fx 'MCPGW_SANDBOX_ENGINE=monty' /etc/mcpgw/mcpgw.env
           test -x /opt/mcpgw/bin/montyrs-worker

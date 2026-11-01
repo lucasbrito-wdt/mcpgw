@@ -549,6 +549,7 @@ function Invoke-Uninstall($Cfg) {
     }
     if (Test-Path -LiteralPath $InstallDir) { Remove-Item -LiteralPath $InstallDir -Recurse -Force }
     Update-MachinePath $InstallDir $false
+    if ($Cfg.Purge) { Write-Warning "Purging $DataDir deletes MCPGW_MASTER_KEY: the data in the database can no longer be decrypted." }
     if ($Cfg.Purge -and (Test-Path -LiteralPath $DataDir)) { Remove-Item -LiteralPath $DataDir -Recurse -Force }
     Write-Host 'mcpgw removed. The PostgreSQL database and server were not touched.'
     if (-not $Cfg.Purge) { Write-Host "Config and logs kept in $DataDir (use -Purge to remove)." }

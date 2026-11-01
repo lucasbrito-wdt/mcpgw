@@ -622,6 +622,7 @@ do_uninstall() {
   if [ -L "$LINK" ] && [ "$(readlink "$LINK")" = "$BIN_DIR/mcpgw" ]; then rm -f "$LINK"; fi
   rm -rf "$INSTALL_DIR"
   if [ "$PURGE" = 1 ]; then
+    warn "purging $CONF_DIR deletes MCPGW_MASTER_KEY: the data in the database can no longer be decrypted"
     rm -rf "$CONF_DIR"
     [ -z "$LOG_DIR" ] || rm -rf "$LOG_DIR"
     if [ "$OS" = linux ]; then
