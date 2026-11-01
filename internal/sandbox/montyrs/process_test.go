@@ -6,6 +6,7 @@ import (
 	"os/exec"
 	"runtime"
 	"runtime/debug"
+	"slices"
 	"strconv"
 	"strings"
 	"syscall"
@@ -35,9 +36,28 @@ func liveWorker(t *testing.T, e *Executor) *worker {
 	return nil
 }
 
-func signalWorker(t *testing.T, e *Executor, sig syscall.Signal) {
+// servingWorker returns the worker running the current Run: the only live
+// child that is not idle. Call it from a bridge, while the run waits on it.
+func servingWorker(t *testing.T, e *Executor) *worker {
 	t.Helper()
-	if err := liveWorker(t, e).cmd.Process.Signal(sig); err != nil {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	var serving []*worker
+	for w := range e.children {
+		isIdle := slices.ContainsFunc(e.idle, func(iw idleWorker) bool { return iw.w == w })
+		if !isIdle && !w.isDead() {
+			serving = append(serving, w)
+		}
+	}
+	if len(serving) != 1 {
+		t.Fatalf("%d busy workers, want 1", len(serving))
+	}
+	return serving[0]
+}
+
+func signalWorker(t *testing.T, w *worker, sig syscall.Signal) {
+	t.Helper()
+	if err := w.cmd.Process.Signal(sig); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -61,7 +81,7 @@ func mustRunOn(t *testing.T, e *Executor, code string) {
 func TestWorkerKilledMidRunFailsOnlyThatRun(t *testing.T) {
 	e := newExecutor(t, WithMaxConcurrent(1))
 	bridge := func(ctx context.Context, _ string, _ json.RawMessage) (json.RawMessage, error) {
-		signalWorker(t, e, syscall.SIGKILL)
+		signalWorker(t, servingWorker(t, e), syscall.SIGKILL)
 		<-ctx.Done()
 		return nil, ctx.Err()
 	}
@@ -82,14 +102,14 @@ func TestHugeBridgeReplyHitsTheHardMemoryCeiling(t *testing.T) {
 
 func TestWorkerDeadWhileIdleIsReplacedTransparently(t *testing.T) {
 	e := newExecutor(t, WithMaxConcurrent(1))
-	signalWorker(t, e, syscall.SIGKILL)
+	signalWorker(t, liveWorker(t, e), syscall.SIGKILL)
 	mustRunOn(t, e, `1`)
 }
 
 func TestKilledWorkersDoNotLeakGoroutinesOrHeap(t *testing.T) {
 	e := newExecutor(t, WithMaxConcurrent(1))
 	bridge := func(ctx context.Context, _ string, _ json.RawMessage) (json.RawMessage, error) {
-		signalWorker(t, e, syscall.SIGKILL)
+		signalWorker(t, servingWorker(t, e), syscall.SIGKILL)
 		<-ctx.Done()
 		return nil, ctx.Err()
 	}

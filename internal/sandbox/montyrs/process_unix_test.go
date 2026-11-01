@@ -7,11 +7,16 @@ package montyrs
 // the confined worker, so stopping or measuring it would miss the worker.
 
 import (
+	"bytes"
 	"context"
 	"encoding/binary"
 	"encoding/json"
+	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"runtime"
+	"strconv"
 	"strings"
 	"syscall"
 	"testing"
@@ -23,7 +28,9 @@ import (
 func TestHungWorkerIsKilledAtTheDeadline(t *testing.T) {
 	e := newExecutor(t, WithMaxConcurrent(1))
 	bridge := func(context.Context, string, json.RawMessage) (json.RawMessage, error) {
-		signalWorker(t, e, syscall.SIGSTOP) // the worker stops answering, even to abort
+		w := servingWorker(t, e)
+		signalWorker(t, w, syscall.SIGSTOP) // the worker stops answering, even to abort
+		waitStopped(t, w.cmd.Process.Pid)
 		return json.RawMessage(`1`), nil
 	}
 	start := time.Now()
@@ -33,6 +40,48 @@ func TestHungWorkerIsKilledAtTheDeadline(t *testing.T) {
 		t.Errorf("returned after %v, want about timeout + abort grace", elapsed)
 	}
 	mustRunOn(t, e, `1`)
+}
+
+// waitStopped waits until every thread of pid is stopped. kill(SIGSTOP)
+// returns before a thread running on another CPU stops, and in that window
+// the worker could still answer the run.
+func waitStopped(t *testing.T, pid int) {
+	t.Helper()
+	deadline := time.Now().Add(time.Second)
+	for !isStopped(t, pid) {
+		if time.Now().After(deadline) {
+			t.Fatalf("worker %d did not stop", pid)
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
+// isStopped reads each thread's state on Linux; macOS suspends the whole task
+// at once, so ps's process state is enough there.
+func isStopped(t *testing.T, pid int) bool {
+	t.Helper()
+	if runtime.GOOS != "linux" {
+		out, err := exec.Command("ps", "-o", "stat=", "-p", strconv.Itoa(pid)).Output()
+		if err != nil {
+			t.Fatalf("ps: %v", err)
+		}
+		return strings.HasPrefix(strings.TrimSpace(string(out)), "T")
+	}
+	stats, err := filepath.Glob(fmt.Sprintf("/proc/%d/task/*/stat", pid))
+	if err != nil || len(stats) == 0 {
+		t.Fatalf("list threads of %d: %v", pid, err)
+	}
+	for _, path := range stats {
+		stat, err := os.ReadFile(path)
+		if err != nil {
+			return false // the thread just exited; look again
+		}
+		// The state follows the parenthesized command name: "pid (comm) T ...".
+		if fields := strings.Fields(string(stat[bytes.LastIndexByte(stat, ')')+1:])); len(fields) == 0 || fields[0] != "T" {
+			return false
+		}
+	}
+	return true
 }
 
 func TestFinishedAndKilledRunsDoNotRetainMemory(t *testing.T) {

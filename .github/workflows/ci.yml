@@ -69,7 +69,9 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: internal/sandbox/montyrs/worker -> target
-      - run: cargo build --release --manifest-path internal/sandbox/montyrs/worker/Cargo.toml
+      # From the crate dir so .cargo/config.toml (static CRT on Windows) applies.
+      - run: cargo build --release
+        working-directory: internal/sandbox/montyrs/worker
       - run: go test ./internal/sandbox/montyrs/ -count=1
         env:
           MCPGW_MONTYRS_WORKER: ${{ github.workspace }}/internal/sandbox/montyrs/worker/target/release/montyrs-worker${{ runner.os == 'Windows' && '.exe' || '' }}

@@ -10,7 +10,8 @@ admin:
 
 # The montyrs worker is a separate Rust binary; MCPGW_SANDBOX_ENGINE=monty finds it next to mcpgw.
 worker:
-	cargo build --release --manifest-path internal/sandbox/montyrs/worker/Cargo.toml
+	# Run from the crate dir: cargo reads .cargo/config.toml (static CRT on Windows) from the cwd, not the manifest path.
+	cd internal/sandbox/montyrs/worker && cargo build --release
 	mkdir -p bin
 	cp internal/sandbox/montyrs/worker/target/release/montyrs-worker$(EXE) bin/montyrs-worker$(EXE)
 	# The worker runs inside an AppContainer on Windows, which needs read+execute on the exe.

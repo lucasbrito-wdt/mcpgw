@@ -18,16 +18,19 @@
 //!   syscalls, only Microsoft-signed, local, non-low-label DLLs;
 //! - the launcher's stdin, stdout and stderr, and no other handle.
 
-use std::ffi::{CStr, OsStr, c_void};
+use std::ffi::{CStr, OsStr, OsString, c_void};
 use std::marker::PhantomData;
-use std::os::windows::ffi::OsStrExt;
+use std::os::windows::ffi::{OsStrExt, OsStringExt};
+use std::path::PathBuf;
 use std::ptr::{null, null_mut};
 
 use windows_sys::Win32::Foundation::{
     CloseHandle, ERROR_ACCESS_DENIED, GetLastError, HANDLE, HANDLE_FLAG_INHERIT, HMODULE, INVALID_HANDLE_VALUE,
     SetHandleInformation,
 };
-use windows_sys::Win32::Security::{GetTokenInformation, PSID, SECURITY_CAPABILITIES, TOKEN_QUERY, TokenIsAppContainer};
+use windows_sys::Win32::Security::{
+    GetTokenInformation, PSID, SECURITY_CAPABILITIES, TOKEN_DUPLICATE, TOKEN_IMPERSONATE, TOKEN_QUERY, TokenIsAppContainer,
+};
 use windows_sys::Win32::System::Console::{GetStdHandle, STD_ERROR_HANDLE, STD_INPUT_HANDLE, STD_OUTPUT_HANDLE};
 use windows_sys::Win32::System::Diagnostics::Debug::{
     SEM_FAILCRITICALERRORS, SEM_NOGPFAULTERRORBOX, SEM_NOOPENFILEERRORBOX, SetErrorMode,
@@ -44,17 +47,17 @@ use windows_sys::Win32::System::LibraryLoader::{GetProcAddress, LOAD_LIBRARY_SEA
 use windows_sys::Win32::System::SystemInformation::GetSystemDirectoryW;
 use windows_sys::Win32::System::SystemServices::{JOB_OBJECT_MSG_ACTIVE_PROCESS_ZERO, JOB_OBJECT_MSG_PROCESS_MEMORY_LIMIT};
 use windows_sys::Win32::System::Threading::{
-    CREATE_SUSPENDED, CreateProcessW, DETACHED_PROCESS, DeleteProcThreadAttributeList, EXTENDED_STARTUPINFO_PRESENT,
+    CREATE_SUSPENDED, CreateMutexW, CreateProcessW, DETACHED_PROCESS, DeleteProcThreadAttributeList, EXTENDED_STARTUPINFO_PRESENT,
     GetCurrentProcess, GetExitCodeProcess, GetProcessMitigationPolicy, INFINITE, InitializeProcThreadAttributeList,
     LPPROC_THREAD_ATTRIBUTE_LIST, OpenProcessToken, PROC_THREAD_ATTRIBUTE_CHILD_PROCESS_POLICY,
     PROC_THREAD_ATTRIBUTE_HANDLE_LIST, PROC_THREAD_ATTRIBUTE_MITIGATION_POLICY,
     PROC_THREAD_ATTRIBUTE_SECURITY_CAPABILITIES, PROCESS_INFORMATION, PROCESS_MITIGATION_POLICY,
     ProcessChildProcessPolicy, ProcessDynamicCodePolicy, ProcessImageLoadPolicy, ProcessSignaturePolicy,
-    ProcessSystemCallDisablePolicy, ResumeThread, STARTF_USESTDHANDLES, STARTUPINFOEXW, TerminateProcess,
+    ProcessSystemCallDisablePolicy, ReleaseMutex, ResumeThread, STARTF_USESTDHANDLES, STARTUPINFOEXW, TerminateProcess,
     UpdateProcThreadAttribute, WaitForSingleObject,
 };
 use windows_sys::Win32::System::WindowsProgramming::PROCESS_CREATION_CHILD_PROCESS_RESTRICTED;
-use windows_sys::core::{HRESULT, PCWSTR};
+use windows_sys::core::{BOOL, HRESULT, PCWSTR};
 
 /// Deterministic, so every launcher uses the same AppContainer SID.
 const APP_CONTAINER_NAME: &str = "mcpgw.montyrs";
@@ -92,12 +95,40 @@ const REQUIRED_POLICIES: [(PROCESS_MITIGATION_POLICY, u32, &str); 5] = [
     (ProcessChildProcessPolicy, 0b1, "NoChildProcessCreation"),
 ];
 
+/// Serializes profile creation across launchers: a profile half created by
+/// another launcher has no folder yet, and CreateProcessW fails on it.
+const PROFILE_MUTEX_NAME: &str = "Local\\mcpgw.montyrs.profile";
+
+/// The user's standard variables the launcher takes from its default
+/// environment block. CreateProcessW resolves an AppContainer's folders from
+/// them (without them it fails with ERROR_ENVVAR_NOT_FOUND), and Windows
+/// processes expect SystemRoot. Anything user-defined stays out.
+const PROFILE_ENV_VARS: [&str; 16] = [
+    "ALLUSERSPROFILE",
+    "APPDATA",
+    "ComSpec",
+    "HOMEDRIVE",
+    "HOMEPATH",
+    "LOCALAPPDATA",
+    "ProgramData",
+    "ProgramFiles",
+    "PUBLIC",
+    "SystemDrive",
+    "SystemRoot",
+    "TEMP",
+    "TMP",
+    "USERNAME",
+    "USERPROFILE",
+    "windir",
+];
+
 /// ALL APPLICATION PACKAGES, the group every AppContainer token belongs to.
 const ALL_APPLICATION_PACKAGES_SID: &str = "S-1-15-2-1";
 
 type CreateProfileFn =
     unsafe extern "system" fn(PCWSTR, PCWSTR, PCWSTR, *const c_void, u32, *mut PSID) -> HRESULT;
 type DeriveSidFn = unsafe extern "system" fn(PCWSTR, *mut PSID) -> HRESULT;
+type CreateEnvironmentBlockFn = unsafe extern "system" fn(*mut *mut c_void, HANDLE, BOOL) -> BOOL;
 type RawProc = unsafe extern "system" fn() -> isize;
 
 /// Returns in the confined child; in the launcher it never returns.
@@ -140,7 +171,9 @@ fn launch() -> Result<u32, String> {
     // Inherited by the child; the job also forces SEM_NOGPFAULTERRORBOX.
     unsafe { SetErrorMode(SEM_FAILCRITICALERRORS | SEM_NOGPFAULTERRORBOX | SEM_NOOPENFILEERRORBOX) };
     let memory_limit = memory_cap()?.saturating_add(JOB_MEMORY_HEADROOM_BYTES);
-    let sid = app_container_sid()?;
+    let userenv = load_userenv()?;
+    set_profile_environment(userenv)?;
+    let sid = app_container_sid(userenv)?;
     let (job, port) = create_job(memory_limit)?;
     let child = spawn_suspended(sid)?;
     // Assigned while suspended: the child never runs a single instruction outside the job.
@@ -172,21 +205,71 @@ fn memory_cap() -> Result<usize, String> {
 
 /// userenv.dll is loaded at run time, never imported: the confined child runs
 /// this same binary, and each DLL it imports must load under its mitigations.
-fn app_container_sid() -> Result<PSID, String> {
+fn load_userenv() -> Result<HMODULE, String> {
     let userenv = unsafe { LoadLibraryExW(wide("userenv.dll").as_ptr(), null_mut(), LOAD_LIBRARY_SEARCH_SYSTEM32) };
     if userenv.is_null() {
         return Err(last_error("load userenv.dll"));
     }
+    Ok(userenv)
+}
+
+/// The gateway starts the launcher with an empty environment (Go adds only
+/// SYSTEMROOT). Sets PROFILE_ENV_VARS from the user's default environment
+/// block, which never contains the gateway's own variables; the confined
+/// child inherits them, with the AppContainer's folders swapped in.
+fn set_profile_environment(userenv: HMODULE) -> Result<(), String> {
+    let create_block = unsafe {
+        std::mem::transmute::<RawProc, CreateEnvironmentBlockFn>(proc_address(userenv, c"CreateEnvironmentBlock")?)
+    };
+    let mut token: HANDLE = null_mut();
+    let access = TOKEN_QUERY | TOKEN_DUPLICATE | TOKEN_IMPERSONATE;
+    if unsafe { OpenProcessToken(GetCurrentProcess(), access, &mut token) } == 0 {
+        return Err(last_error("OpenProcessToken"));
+    }
+    let mut block: *mut c_void = null_mut();
+    let created = unsafe { create_block(&mut block, token, 0) };
+    unsafe { CloseHandle(token) };
+    if created == 0 {
+        return Err(last_error("CreateEnvironmentBlock"));
+    }
+    // The block is "NAME=value\0" entries ending with an empty one. It lives
+    // until the launcher exits.
+    let mut entry = block.cast::<u16>().cast_const();
+    loop {
+        let len = (0..).take_while(|&i| unsafe { *entry.add(i) } != 0).count();
+        if len == 0 {
+            return Ok(());
+        }
+        let text = String::from_utf16_lossy(unsafe { std::slice::from_raw_parts(entry, len) });
+        // Skips the "=C:=C:\\" drive entries, whose name starts with '='.
+        if let Some((name, value)) = text.split_once('=').filter(|(name, _)| !name.is_empty())
+            && PROFILE_ENV_VARS.iter().any(|v| v.eq_ignore_ascii_case(name))
+        {
+            // SAFETY: the launcher is single-threaded.
+            unsafe { std::env::set_var(name, value) };
+        }
+        entry = unsafe { entry.add(len + 1) };
+    }
+}
+
+fn app_container_sid(userenv: HMODULE) -> Result<PSID, String> {
     let create = unsafe { std::mem::transmute::<RawProc, CreateProfileFn>(proc_address(userenv, c"CreateAppContainerProfile")?) };
     let derive = unsafe {
         std::mem::transmute::<RawProc, DeriveSidFn>(proc_address(userenv, c"DeriveAppContainerSidFromAppContainerName")?)
     };
     let name = wide(APP_CONTAINER_NAME);
     let mut sid: PSID = null_mut();
-    // The profile only registers the name. If creating it fails (it exists,
-    // or a concurrent launcher is creating it), the SID derived from the
-    // name is the same one. The SID lives until the launcher exits.
-    if unsafe { create(name.as_ptr(), name.as_ptr(), name.as_ptr(), null(), 0, &mut sid) } >= 0 {
+    let mutex = unsafe { CreateMutexW(null(), 0, wide(PROFILE_MUTEX_NAME).as_ptr()) };
+    if mutex.is_null() {
+        return Err(last_error("CreateMutexW"));
+    }
+    // WAIT_ABANDONED (a launcher died holding it) also grants ownership.
+    unsafe { WaitForSingleObject(mutex, INFINITE) };
+    // Fails once the profile exists; the SID derived from the name is the
+    // same one. The SID lives until the launcher exits.
+    let created = unsafe { create(name.as_ptr(), name.as_ptr(), name.as_ptr(), null(), 0, &mut sid) };
+    unsafe { ReleaseMutex(mutex) };
+    if created >= 0 {
         return Ok(sid);
     }
     let hr = unsafe { derive(name.as_ptr(), &mut sid) };
@@ -249,7 +332,7 @@ fn hit_memory_limit(port: HANDLE) -> bool {
 
 /// Starts this binary again, suspended, inside the AppContainer, with the
 /// mitigations on and only the standard handles inherited. It inherits the
-/// launcher's environment, which the gateway already emptied.
+/// launcher's environment: only PROFILE_ENV_VARS (set_profile_environment).
 fn spawn_suspended(sid: PSID) -> Result<PROCESS_INFORMATION, String> {
     let [stdin, stdout, stderr] = std_handles()?;
     let mut inherited = vec![stdin, stdout, stderr];
@@ -263,7 +346,7 @@ fn spawn_suspended(sid: PSID) -> Result<PROCESS_INFORMATION, String> {
     attributes.set(PROC_THREAD_ATTRIBUTE_MITIGATION_POLICY, &MITIGATIONS)?;
     attributes.set(PROC_THREAD_ATTRIBUTE_HANDLE_LIST, inherited.as_slice())?;
 
-    let exe = std::env::current_exe().map_err(|e| format!("current_exe: {e}"))?;
+    let exe = own_image_path()?;
     let mut command_line = own_command_line();
     // The AppContainer can traverse the system directory, not the caller's.
     let cwd = system_directory()?;
@@ -316,6 +399,15 @@ fn std_handles() -> Result<[HANDLE; 3], String> {
         *slot = handle;
     }
     Ok(handles)
+}
+
+/// GetModuleFileNameW with backslashes only: the gateway may start the
+/// launcher through a path with forward slashes, which the image keeps.
+fn own_image_path() -> Result<PathBuf, String> {
+    let exe = std::env::current_exe().map_err(|e| format!("current_exe: {e}"))?;
+    let backslashed: Vec<u16> =
+        exe.as_os_str().encode_wide().map(|c| if c == u16::from(b'/') { u16::from(b'\\') } else { c }).collect();
+    Ok(PathBuf::from(OsString::from_wide(&backslashed)))
 }
 
 /// GetCommandLineW, NUL-terminated and writable as CreateProcessW requires.
