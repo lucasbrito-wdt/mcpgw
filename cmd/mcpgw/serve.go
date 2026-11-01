@@ -158,6 +158,9 @@ func isTerminal(f *os.File) bool {
 
 // buildVersion returns the module version stamped into the binary, or "" for local builds.
 func buildVersion() string {
+	if version != "dev" {
+		return version
+	}
 	info, ok := debug.ReadBuildInfo()
 	if !ok || info.Main.Version == "(devel)" {
 		return ""
